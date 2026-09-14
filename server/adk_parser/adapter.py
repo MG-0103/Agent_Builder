@@ -42,6 +42,7 @@ CALLBACK_KWARGS = {
 class ModuleIndex:
     path: Path
     fq_module: str
+    is_package: bool
     tree: ast.Module
     adk_aliases: dict[str, str] = field(default_factory=dict)
     # local_name -> (source_module_fq, name_in_source). name_in_source == local_name
@@ -67,19 +68,30 @@ def _module_fq(root: Path, path: Path) -> str:
     return ".".join(parts)
 
 
-def _resolve_relative(base_fq: str, module: str | None, level: int) -> str:
+def _resolve_relative(base_fq: str, is_package: bool, module: str | None, level: int) -> str:
     if level == 0:
         return module or ""
-    base_parts = base_fq.split(".") if base_fq else []
-    # `level` dots means climb `level - 1` parents from current package.
-    # For file `a.b.c`, `from . import x` (level=1) resolves to package `a.b`.
-    anchor = base_parts[:-level] if level <= len(base_parts) else []
+    # From CPython's semantics: `from .x import y` in a package __init__ resolves
+    # relative to the package itself, but the same statement inside a module
+    # `pkg.mod` resolves relative to `pkg`. Normalize by adding one virtual climb
+    # for non-package modules.
+    climbs = level if is_package else level
+    if not is_package:
+        # `pkg.mod` with level=1 -> anchor `pkg`
+        climbs = level
+        base_parts = base_fq.split(".") if base_fq else []
+        anchor = base_parts[:-climbs] if climbs <= len(base_parts) else []
+    else:
+        # `pkg` (init) with level=1 -> anchor `pkg`; level=2 -> parent of `pkg`.
+        base_parts = base_fq.split(".") if base_fq else []
+        extra = level - 1
+        anchor = base_parts[:len(base_parts) - extra] if extra <= len(base_parts) else []
     if module:
         anchor = anchor + module.split(".")
     return ".".join(anchor)
 
 
-def _build_import_tables(tree: ast.Module, fq_module: str) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
     """Return (adk_aliases, imports).
 
     - adk_aliases: local_name -> qualified ADK path (e.g. 'google.adk.agents.LlmAgent')
@@ -90,7 +102,7 @@ def _build_import_tables(tree: ast.Module, fq_module: str) -> tuple[dict[str, st
     imp: dict[str, tuple[str, str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            source = _resolve_relative(fq_module, node.module, node.level or 0)
+            source = _resolve_relative(fq_module, is_package, node.module, node.level or 0)
             for alias in node.names:
                 local = alias.asname or alias.name
                 if source.startswith(ADK_MODULE_PREFIX):
@@ -108,11 +120,12 @@ def _build_import_tables(tree: ast.Module, fq_module: str) -> tuple[dict[str, st
 
 
 def _resolve_call_name(call: ast.Call, aliases: dict[str, str]) -> str | None:
+    """Return the ADK short class name (e.g. 'LlmAgent'), honoring `as` aliases."""
     func = call.func
     if isinstance(func, ast.Name):
         qual = aliases.get(func.id)
         if qual and qual.startswith(ADK_MODULE_PREFIX):
-            return func.id
+            return qual.rsplit(".", 1)[-1]
     elif isinstance(func, ast.Attribute):
         return func.attr
     return None
@@ -129,8 +142,9 @@ def parse_path(root: str | Path) -> Graph:
         except SyntaxError:
             continue
         fq = _module_fq(root, py)
-        adk, imp = _build_import_tables(tree, fq)
-        modules.append(ModuleIndex(path=py, fq_module=fq, tree=tree, adk_aliases=adk, imports=imp))
+        is_pkg = py.name == "__init__.py"
+        adk, imp = _build_import_tables(tree, fq, is_pkg)
+        modules.append(ModuleIndex(path=py, fq_module=fq, is_package=is_pkg, tree=tree, adk_aliases=adk, imports=imp))
 
     for mod in modules:
         _extract_agents(mod, graph)
@@ -312,15 +326,16 @@ def _extract_callbacks(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: G
         if isinstance(kw.value, ast.Name):
             cb_name = kw.value.id
             cb_id = f"{mod.fq_module}:cb:{cb_name}"
-            graph.nodes.append(
-                Node(
-                    id=cb_id,
-                    kind="callback",
-                    name=cb_name,
-                    provenance=Provenance(file=str(mod.path), line=kw.value.lineno),
-                    meta={"phase": kw.arg},
+            if not any(n.id == cb_id for n in graph.nodes):
+                graph.nodes.append(
+                    Node(
+                        id=cb_id,
+                        kind="callback",
+                        name=cb_name,
+                        provenance=Provenance(file=str(mod.path), line=kw.value.lineno),
+                        meta={"phase": kw.arg},
+                    )
                 )
-            )
             mod.symbols.setdefault(cb_name, cb_id)
             graph.edges.append(
                 Edge(
