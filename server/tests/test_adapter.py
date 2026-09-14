@@ -15,6 +15,7 @@ CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
 CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
 ATTR_CHAIN = Path(__file__).parent / "fixtures" / "attr_chain"
 STATE_FLOW = Path(__file__).parent / "fixtures" / "state_flow"
+DYNAMIC_TOOLS = Path(__file__).parent / "fixtures" / "dynamic_tools"
 
 
 def _by_kind(graph, kind):
@@ -247,3 +248,35 @@ def test_state_flow_no_producer_no_edge():
     loner = _find(g.nodes, "loner")
     incoming = [e for e in g.edges if e.kind == "shares_state" and e.target == loner.id]
     assert incoming == []
+
+
+def _tool_names_for(g, agent_name):
+    agent = _find(g.nodes, agent_name)
+    return {
+        next(n.name for n in g.nodes if n.id == e.target)
+        for e in g.edges if e.kind == "uses_tool" and e.source == agent.id
+    }
+
+
+def test_dynamic_tools_via_variable():
+    g = parse_path(DYNAMIC_TOOLS)
+    assert _tool_names_for(g, "via_var") == {"search", "fetch"}
+
+
+def test_dynamic_tools_via_function_return():
+    g = parse_path(DYNAMIC_TOOLS)
+    assert _tool_names_for(g, "via_fn") == {"search", "summarize"}
+
+
+def test_dynamic_tools_via_concat():
+    g = parse_path(DYNAMIC_TOOLS)
+    assert _tool_names_for(g, "via_concat") == {"search", "summarize", "translate"}
+
+
+def test_dynamic_tools_unresolvable_marked():
+    g = parse_path(DYNAMIC_TOOLS)
+    via_dyn = _find(g.nodes, "via_dyn")
+    assert any(
+        u.get("agent") == via_dyn.id and u.get("field") == "tools"
+        for u in g.unresolved
+    )

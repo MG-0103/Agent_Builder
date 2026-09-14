@@ -347,13 +347,15 @@ def _ref_placeholder(expr: ast.expr, mod: ModuleIndex) -> str | None:
 
 def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph) -> None:
     tools = _kwarg(call, "tools")
-    if not isinstance(tools, ast.List):
-        if tools is not None:
-            graph.unresolved.append(
-                {"agent": agent_id, "field": "tools", "reason": "non-literal", "file": str(mod.path), "line": call.lineno}
-            )
+    if tools is None:
         return
-    for i, elt in enumerate(tools.elts):
+    elts = _resolve_tool_list(tools, mod)
+    if elts is None:
+        graph.unresolved.append(
+            {"agent": agent_id, "field": "tools", "reason": "non-literal", "file": str(mod.path), "line": call.lineno}
+        )
+        return
+    for i, elt in enumerate(elts):
         tool_id, tool_node, edge_kind = _resolve_tool_elt(elt, mod, i)
         if tool_node:
             graph.nodes.append(tool_node)
@@ -366,6 +368,63 @@ def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph
                 meta={"index": i},
             )
         )
+
+
+def _module_top_level_assign(tree: ast.Module, name: str) -> ast.expr | None:
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            if stmt.targets[0].id == name:
+                return stmt.value
+    return None
+
+
+def _module_function_def(tree: ast.Module, name: str) -> ast.FunctionDef | None:
+    for stmt in tree.body:
+        if isinstance(stmt, ast.FunctionDef) and stmt.name == name:
+            return stmt
+    return None
+
+
+def _resolve_tool_list(
+    expr: ast.expr, mod: ModuleIndex, seen: set[int] | None = None
+) -> list[ast.expr] | None:
+    """Resolve a tools kwarg expression into a concrete list of element ASTs.
+
+    Handles literal lists, variables bound to lists, `+` concatenation, and one-hop
+    calls to local functions whose body returns a list literal.
+    """
+    seen = seen or set()
+    if id(expr) in seen:
+        return None
+    seen.add(id(expr))
+
+    if isinstance(expr, ast.List):
+        return list(expr.elts)
+
+    if isinstance(expr, ast.Name):
+        rhs = _module_top_level_assign(mod.tree, expr.id)
+        if rhs is not None:
+            return _resolve_tool_list(rhs, mod, seen)
+        return None
+
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        left = _resolve_tool_list(expr.left, mod, seen)
+        right = _resolve_tool_list(expr.right, mod, seen)
+        if left is not None and right is not None:
+            return left + right
+        return None
+
+    if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+        fn = _module_function_def(mod.tree, expr.func.id)
+        if fn is not None:
+            for node in fn.body:
+                if isinstance(node, ast.Return) and node.value is not None:
+                    result = _resolve_tool_list(node.value, mod, seen)
+                    if result is not None:
+                        return result
+        return None
+
+    return None
 
 
 def _resolve_tool_elt(elt: ast.expr, mod: ModuleIndex, idx: int) -> tuple[str, Node | None, str]:
