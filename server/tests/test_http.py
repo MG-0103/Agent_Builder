@@ -54,3 +54,27 @@ def test_parse_cache_invalidates_on_mtime_change(tmp_path):
     )
     r2 = client.post("/parse", json={"repo_path": str(scratch)}).json()
     assert len(r2["nodes"]) > n1
+
+
+PROBE_FIXTURE = Path(__file__).parent / "fixtures" / "runtime_probe"
+
+
+def test_probe_endpoint():
+    r = client.post("/probe", json={"repo_path": str(PROBE_FIXTURE), "entry_module": "agent"})
+    assert r.status_code == 200
+    body = r.json()
+    names = {n["name"] for n in body["nodes"]}
+    assert {"researcher", "writer", "pipeline"} <= names
+
+
+def test_parse_with_entry_module_merges_probe():
+    r = client.post("/parse", json={"repo_path": str(PROBE_FIXTURE), "entry_module": "agent"})
+    assert r.status_code == 200
+    body = r.json()
+    # Runtime discovered researcher/writer/pipeline; none exist statically here
+    # (this fixture uses plain classes, not the ADK LlmAgent import), so they
+    # arrive as runtime-only nodes tagged observed.
+    names = {n["name"] for n in body["nodes"]}
+    assert {"researcher", "writer", "pipeline"} <= names
+    runtime_only = [n for n in body["nodes"] if n["meta"].get("runtime_only")]
+    assert len(runtime_only) >= 3

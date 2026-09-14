@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from adk_parser import parse_path
+from adk_parser import parse_path, run_probe, merge_runtime
 
 app = FastAPI(title="AgentBuilder Parser")
 
@@ -20,9 +20,16 @@ app.add_middleware(
 
 class ParseRequest(BaseModel):
     repo_path: str
+    entry_module: str | None = None  # If set, merge runtime probe into result.
 
 
-_cache: dict[tuple[str, float], dict[str, Any]] = {}
+class ProbeRequest(BaseModel):
+    repo_path: str
+    entry_module: str
+    timeout: float = 30.0
+
+
+_cache: dict[tuple[str, float, str], dict[str, Any]] = {}
 
 
 def _max_mtime(root: Path) -> float:
@@ -46,13 +53,25 @@ def parse(req: ParseRequest):
     root = Path(req.repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
-    key = (str(root), _max_mtime(root))
+    key = (str(root), _max_mtime(root), req.entry_module or "")
     hit = _cache.get(key)
     if hit is not None:
         return hit
-    result = parse_path(root).model_dump()
+    graph = parse_path(root)
+    if req.entry_module:
+        observed = run_probe(root, req.entry_module)
+        merge_runtime(graph, observed)
+    result = graph.model_dump()
     _cache[key] = result
     return result
+
+
+@app.post("/probe")
+def probe(req: ProbeRequest):
+    root = Path(req.repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    return run_probe(root, req.entry_module, timeout=req.timeout)
 
 
 @app.get("/health")
