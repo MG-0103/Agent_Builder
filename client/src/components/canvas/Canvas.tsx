@@ -11,6 +11,7 @@ import { useCanvasActions } from './hooks/useCanvasActions';
 
 import DefaultNode from './ui/nodes/DefaultNode';
 import { PropertiesPanel } from './ui/properties/PropertiesPanel';
+import { LoadRepo } from './ui/LoadRepo';
 
 import { PanelRight, PanelRightClose } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
@@ -73,6 +74,7 @@ export default function Canvas() {
                     <Background />
                 </ReactFlow>
 
+                <LoadRepo />
                 {showProperties && <PropertiesPanel />}
             </div>
         </>

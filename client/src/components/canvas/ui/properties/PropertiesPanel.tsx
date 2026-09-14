@@ -44,10 +44,6 @@ export function PropertiesPanel() {
         (edge) => edge.id === selectedEdgeId
     );
 
-    if (!node && !edge) {
-        return null;
-    }
-
     const connections = useMemo(() => {
         if (!node) return null;
 
@@ -57,6 +53,10 @@ export function PropertiesPanel() {
             edges: getConnectedEdges([node], edges),
         };
     }, [node, nodes, edges]);
+
+    if (!node && !edge) {
+        return null;
+    }
 
     return (
         <Card className="absolute right-4 top-4 z-10 w-72 gap-0 overflow-hidden py-0 shadow-lg">
