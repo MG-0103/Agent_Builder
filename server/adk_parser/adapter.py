@@ -234,6 +234,7 @@ def parse_path(root: str | Path) -> Graph:
     for mod in modules:
         _extract_graph_builders(mod, graph)
 
+    _extract_state_flow(graph)
     _resolve_cross_file(modules, graph)
     return graph
 
@@ -265,13 +266,20 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
         name = _kwarg_str(node, "name") or agent_local or f"anon_{node.lineno}"
         agent_id = f"{mod.fq_module or mod.path.name}:{name}:{node.lineno}"
 
+        meta: dict = {"class": cls, "model": _kwarg_str(node, "model")}
+        output_key = _kwarg_str(node, "output_key")
+        instruction = _kwarg_str(node, "instruction")
+        if output_key:
+            meta["output_key"] = output_key
+        if instruction:
+            meta["instruction"] = instruction
         graph.nodes.append(
             Node(
                 id=agent_id,
                 kind=kind,
                 name=name,
                 provenance=Provenance(file=str(mod.path), line=node.lineno, col=node.col_offset),
-                meta={"class": cls, "model": _kwarg_str(node, "model")},
+                meta=meta,
             )
         )
         if agent_local:
@@ -651,6 +659,44 @@ def _gb_entry_point(call: ast.Call, builder: dict, mod: ModuleIndex, graph: Grap
         # Pydantic BaseModel disallows unknown attrs by default; assign via __dict__.
         object.__setattr__(graph, "_entry_pending", pending)
     pending.append(tgt)
+
+
+# ---- State-flow extractor (output_key -> instruction placeholder) --------
+
+import re as _re
+
+_STATE_KEY_RE = _re.compile(r"\{(\w+)\}")
+
+
+def _extract_state_flow(graph: Graph) -> None:
+    """Emit shares_state edges from producer.output_key to any agent whose
+    instruction references {key}."""
+    producers: dict[str, list[str]] = {}
+    for n in graph.nodes:
+        key = n.meta.get("output_key") if isinstance(n.meta, dict) else None
+        if isinstance(key, str):
+            producers.setdefault(key, []).append(n.id)
+
+    if not producers:
+        return
+
+    for consumer in graph.nodes:
+        instr = consumer.meta.get("instruction") if isinstance(consumer.meta, dict) else None
+        if not isinstance(instr, str):
+            continue
+        for key in set(_STATE_KEY_RE.findall(instr)):
+            for producer_id in producers.get(key, []):
+                if producer_id == consumer.id:
+                    continue
+                graph.edges.append(
+                    Edge(
+                        id=f"{producer_id}->{consumer.id}:state:{key}",
+                        source=producer_id,
+                        target=consumer.id,
+                        kind="shares_state",
+                        meta={"key": key},
+                    )
+                )
 
 
 # ---- Pass 4: cross-file resolver -----------------------------------------

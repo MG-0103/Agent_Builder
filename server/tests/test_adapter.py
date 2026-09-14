@@ -14,6 +14,7 @@ GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
 CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
 CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
 ATTR_CHAIN = Path(__file__).parent / "fixtures" / "attr_chain"
+STATE_FLOW = Path(__file__).parent / "fixtures" / "state_flow"
 
 
 def _by_kind(graph, kind):
@@ -220,3 +221,29 @@ def test_attr_chain_tool_via_module_alias():
 def test_attr_chain_no_unresolved():
     g = parse_path(ATTR_CHAIN)
     assert g.unresolved == []
+
+
+def test_state_flow_direct():
+    g = parse_path(STATE_FLOW)
+    drafter = _find(g.nodes, "drafter")
+    editor = _find(g.nodes, "editor")
+    edges = [e for e in g.edges if e.kind == "shares_state" and e.source == drafter.id and e.target == editor.id]
+    assert len(edges) == 1
+    assert edges[0].meta["key"] == "draft"
+
+
+def test_state_flow_multiple_keys_in_consumer():
+    g = parse_path(STATE_FLOW)
+    editor = _find(g.nodes, "editor")
+    drafter = _find(g.nodes, "drafter")
+    publisher = _find(g.nodes, "publisher")
+    incoming = [(e.source, e.meta["key"]) for e in g.edges if e.kind == "shares_state" and e.target == publisher.id]
+    assert (editor.id, "edited") in incoming
+    assert (drafter.id, "draft") in incoming
+
+
+def test_state_flow_no_producer_no_edge():
+    g = parse_path(STATE_FLOW)
+    loner = _find(g.nodes, "loner")
+    incoming = [e for e in g.edges if e.kind == "shares_state" and e.target == loner.id]
+    assert incoming == []
