@@ -13,6 +13,7 @@ MALFORMED = Path(__file__).parent / "fixtures" / "malformed"
 GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
 CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
 CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
+ATTR_CHAIN = Path(__file__).parent / "fixtures" / "attr_chain"
 
 
 def _by_kind(graph, kind):
@@ -199,3 +200,23 @@ def test_custom_agent_cross_file_transitive():
     d = _find(g.nodes, "d")
     assert d.kind == "llm_agent"
     assert d.meta["class"] == "DeepReviewer"
+
+
+def test_attr_chain_sub_agent_import_module():
+    g = parse_path(ATTR_CHAIN)
+    pipeline = _find(_by_kind(g, "sequential_agent"), "pipeline")
+    researcher = _find(_by_kind(g, "llm_agent"), "researcher")
+    owns = [e for e in g.edges if e.kind == "owns_subagent" and e.source == pipeline.id]
+    assert researcher.id in {e.target for e in owns}
+
+
+def test_attr_chain_tool_via_module_alias():
+    g = parse_path(ATTR_CHAIN)
+    tools = [n for n in _by_kind(g, "tool_function") if n.name == "search_web"]
+    assert len(tools) == 1
+    assert tools[0].meta.get("defined_in") == "pkg.tools_mod"
+
+
+def test_attr_chain_no_unresolved():
+    g = parse_path(ATTR_CHAIN)
+    assert g.unresolved == []

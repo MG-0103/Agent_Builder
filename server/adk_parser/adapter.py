@@ -55,6 +55,8 @@ class ModuleIndex:
     symbols: dict[str, str] = field(default_factory=dict)
     # local class name -> resolved agent kind (populated pre-extraction)
     custom_agents: dict[str, str] = field(default_factory=dict)
+    # `import x.y[.z]` / `import x.y as m` -> local_name -> module fq
+    module_imports: dict[str, str] = field(default_factory=dict)
 
 
 def _iter_python_files(root: Path) -> Iterable[Path]:
@@ -96,7 +98,9 @@ def _resolve_relative(base_fq: str, is_package: bool, module: str | None, level:
     return ".".join(anchor)
 
 
-def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+def _build_import_tables(
+    tree: ast.Module, fq_module: str, is_package: bool
+) -> tuple[dict[str, str], dict[str, tuple[str, str]], dict[str, str]]:
     """Return (adk_aliases, imports).
 
     - adk_aliases: local_name -> qualified ADK path (e.g. 'google.adk.agents.LlmAgent')
@@ -105,6 +109,7 @@ def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> 
     """
     adk: dict[str, str] = {}
     imp: dict[str, tuple[str, str]] = {}
+    modules: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             source = _resolve_relative(fq_module, is_package, node.module, node.level or 0)
@@ -116,12 +121,18 @@ def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> 
                     imp[local] = (source, alias.name)
         elif isinstance(node, ast.Import):
             for alias in node.names:
-                local = alias.asname or alias.name
                 if alias.name.startswith(ADK_MODULE_PREFIX):
+                    local = alias.asname or alias.name
                     adk[local] = alias.name
+                    continue
+                # `import a.b.c` binds top-level `a` in Python. `import a.b as m`
+                # binds `m` to the full dotted module.
+                if alias.asname:
+                    modules[alias.asname] = alias.name
                 else:
-                    imp[local] = (alias.name, local)
-    return adk, imp
+                    top = alias.name.split(".")[0]
+                    modules[top] = top
+    return adk, imp, modules
 
 
 def _resolve_name_kind(
@@ -206,8 +217,13 @@ def parse_path(root: str | Path) -> Graph:
             continue
         fq = _module_fq(root, py)
         is_pkg = py.name == "__init__.py"
-        adk, imp = _build_import_tables(tree, fq, is_pkg)
-        modules.append(ModuleIndex(path=py, fq_module=fq, is_package=is_pkg, tree=tree, adk_aliases=adk, imports=imp))
+        adk, imp, mod_imports = _build_import_tables(tree, fq, is_pkg)
+        modules.append(
+            ModuleIndex(
+                path=py, fq_module=fq, is_package=is_pkg, tree=tree,
+                adk_aliases=adk, imports=imp, module_imports=mod_imports,
+            )
+        )
 
     _index_custom_agent_classes(modules)
     modules_by_fq = {m.fq_module: m for m in modules}
@@ -284,6 +300,43 @@ def _placeholder(mod: ModuleIndex, local_name: str) -> str:
     return f"{PLACEHOLDER_PREFIX}{mod.fq_module}::{local_name}"
 
 
+def _attr_chain(expr: ast.expr) -> list[str] | None:
+    """Flatten `a.b.c` (ast.Attribute chain rooted at ast.Name) to ['a','b','c']."""
+    parts: list[str] = []
+    cur: ast.expr = expr
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if not isinstance(cur, ast.Name):
+        return None
+    parts.append(cur.id)
+    parts.reverse()
+    return parts
+
+
+def _ref_placeholder(expr: ast.expr, mod: ModuleIndex) -> str | None:
+    """Emit a `__ref__:<module>::<symbol>` placeholder for a Name or Attribute chain.
+
+    - `agent` (Name) -> ref into current module.
+    - `pkg.mod.agent` (Attribute) -> ref into `pkg.mod` if `pkg` is a module import.
+    - `m.agent` where `import x.y as m` -> ref into `x.y`.
+    """
+    if isinstance(expr, ast.Name):
+        return _placeholder(mod, expr.id)
+    chain = _attr_chain(expr)
+    if not chain or len(chain) < 2:
+        return None
+    root, *rest = chain
+    if root not in mod.module_imports:
+        return None
+    module_fq = mod.module_imports[root]
+    # All attrs except the last extend the module path; last is the symbol.
+    *mid, symbol = rest
+    if mid:
+        module_fq = ".".join([module_fq, *mid])
+    return f"{PLACEHOLDER_PREFIX}{module_fq}::{symbol}"
+
+
 def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph) -> None:
     tools = _kwarg(call, "tools")
     if not isinstance(tools, ast.List):
@@ -319,21 +372,39 @@ def _resolve_tool_elt(elt: ast.expr, mod: ModuleIndex, idx: int) -> tuple[str, N
         mod.symbols.setdefault(elt.id, tid)
         return tid, node, "uses_tool"
 
+    if isinstance(elt, ast.Attribute):
+        chain = _attr_chain(elt)
+        if chain and chain[0] in mod.module_imports:
+            module_fq = mod.module_imports[chain[0]]
+            *mid, symbol = chain[1:]
+            if mid:
+                module_fq = ".".join([module_fq, *mid])
+            tid = f"{module_fq}:tool:{symbol}"
+            return tid, Node(
+                id=tid,
+                kind="tool_function",
+                name=symbol,
+                provenance=Provenance(file=str(mod.path), line=elt.lineno),
+                meta={"defined_in": module_fq},
+            ), "uses_tool"
+
     if isinstance(elt, ast.Call):
         cls = _resolve_call_name(elt, mod.adk_aliases) or _call_attr_name(elt)
         if cls == "AgentTool":
             wrapped = _kwarg(elt, "agent") or (elt.args[0] if elt.args else None)
-            if isinstance(wrapped, ast.Name):
-                target = _placeholder(mod, wrapped.id)
-                tid = f"{mod.fq_module}:agent_as_tool:{wrapped.id}:{elt.lineno}"
-                node = Node(
-                    id=tid,
-                    kind="agent_as_tool",
-                    name=wrapped.id,
-                    provenance=Provenance(file=str(mod.path), line=elt.lineno),
-                    meta={"wraps_ref": target},
-                )
-                return tid, node, "wraps_agent"
+            if wrapped is not None:
+                target = _ref_placeholder(wrapped, mod)
+                if target:
+                    symbol = wrapped.id if isinstance(wrapped, ast.Name) else ".".join(_attr_chain(wrapped) or [])
+                    tid = f"{mod.fq_module}:agent_as_tool:{symbol}:{elt.lineno}"
+                    node = Node(
+                        id=tid,
+                        kind="agent_as_tool",
+                        name=symbol,
+                        provenance=Provenance(file=str(mod.path), line=elt.lineno),
+                        meta={"wraps_ref": target},
+                    )
+                    return tid, node, "wraps_agent"
         if cls == "FunctionTool":
             fn = _kwarg(elt, "func") or (elt.args[0] if elt.args else None)
             fn_name = fn.id if isinstance(fn, ast.Name) else f"anon_{elt.lineno}"
@@ -380,17 +451,19 @@ def _extract_sub_agents(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: 
     if not isinstance(subs, ast.List):
         return
     for i, elt in enumerate(subs.elts):
-        if isinstance(elt, ast.Name):
-            target = _placeholder(mod, elt.id)
-            graph.edges.append(
-                Edge(
-                    id=f"{agent_id}->{elt.id}:sub:{i}",
-                    source=agent_id,
-                    target=target,
-                    kind="owns_subagent",
-                    meta={"order": i, "symbol": elt.id},
-                )
+        target = _ref_placeholder(elt, mod)
+        if not target:
+            continue
+        symbol = elt.id if isinstance(elt, ast.Name) else ".".join(_attr_chain(elt) or [])
+        graph.edges.append(
+            Edge(
+                id=f"{agent_id}->{symbol}:sub:{i}",
+                source=agent_id,
+                target=target,
+                kind="owns_subagent",
+                meta={"order": i, "symbol": symbol},
             )
+        )
 
 
 def _extract_callbacks(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph) -> None:
@@ -491,10 +564,7 @@ def _gb_add_node(call: ast.Call, builder: dict, mod: ModuleIndex) -> None:
     if not label:
         return
 
-    target_id: str | None = None
-    if isinstance(agent_expr, ast.Name):
-        target_id = _placeholder(mod, agent_expr.id)
-
+    target_id = _ref_placeholder(agent_expr, mod) if agent_expr is not None else None
     builder["labels"][label] = target_id
 
 
@@ -502,9 +572,7 @@ def _resolve_endpoint(expr: ast.expr, builder: dict, mod: ModuleIndex) -> str | 
     """Resolve a `add_edge` endpoint to a placeholder or already-known id."""
     if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
         return builder["labels"].get(expr.value)
-    if isinstance(expr, ast.Name):
-        return _placeholder(mod, expr.id)
-    return None
+    return _ref_placeholder(expr, mod)
 
 
 def _gb_add_edge(call: ast.Call, builder: dict, mod: ModuleIndex, graph: Graph) -> None:
