@@ -28,6 +28,8 @@ AGENT_CLASSES = {
     "LoopAgent": "loop_agent",
 }
 
+GRAPH_BUILDER_CLASSES = {"Graph", "Workflow", "StateGraph"}
+
 CALLBACK_KWARGS = {
     "before_agent_callback",
     "after_agent_callback",
@@ -148,6 +150,9 @@ def parse_path(root: str | Path) -> Graph:
 
     for mod in modules:
         _extract_agents(mod, graph)
+
+    for mod in modules:
+        _extract_graph_builders(mod, graph)
 
     _resolve_cross_file(modules, graph)
     return graph
@@ -348,6 +353,169 @@ def _extract_callbacks(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: G
             )
 
 
+# ---- Graph API extractor -------------------------------------------------
+
+
+def _is_graph_builder_call(call: ast.Call, aliases: dict[str, str]) -> str | None:
+    """Return short class name if `call` constructs an ADK graph builder."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        qual = aliases.get(func.id)
+        if qual and qual.startswith(ADK_MODULE_PREFIX):
+            short = qual.rsplit(".", 1)[-1]
+            if short in GRAPH_BUILDER_CLASSES:
+                return short
+    elif isinstance(func, ast.Attribute) and func.attr in GRAPH_BUILDER_CLASSES:
+        return func.attr
+    return None
+
+
+def _extract_graph_builders(mod: ModuleIndex, graph: Graph) -> None:
+    """Detect `g = Graph()` + subsequent `.add_node/.add_edge/.add_conditional_edges`."""
+    builders: dict[str, dict] = {}
+
+    for stmt in mod.tree.body:
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+            cls = _is_graph_builder_call(stmt.value, mod.adk_aliases)
+            if cls and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                var = stmt.targets[0].id
+                builders[var] = {"class": cls, "labels": {}, "line": stmt.lineno}
+
+    if not builders:
+        return
+
+    for node in ast.walk(mod.tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        recv = node.func.value
+        if not isinstance(recv, ast.Name) or recv.id not in builders:
+            continue
+        method = node.func.attr
+        b = builders[recv.id]
+
+        if method == "add_node":
+            _gb_add_node(node, b, mod)
+        elif method == "add_edge":
+            _gb_add_edge(node, b, mod, graph)
+        elif method == "add_conditional_edges":
+            _gb_conditional(node, b, mod, graph)
+        elif method == "set_entry_point":
+            _gb_entry_point(node, b, mod, graph)
+
+
+def _gb_add_node(call: ast.Call, builder: dict, mod: ModuleIndex) -> None:
+    """`gb.add_node("label", agent)` or `gb.add_node("label", node=agent)`."""
+    args = call.args
+    label = None
+    agent_expr: ast.expr | None = None
+
+    if args and isinstance(args[0], ast.Constant) and isinstance(args[0].value, str):
+        label = args[0].value
+    if len(args) >= 2:
+        agent_expr = args[1]
+    for kw in call.keywords:
+        if kw.arg in {"name", "label"} and isinstance(kw.value, ast.Constant):
+            label = kw.value.value
+        elif kw.arg in {"node", "agent", "action"}:
+            agent_expr = kw.value
+
+    if not label:
+        return
+
+    target_id: str | None = None
+    if isinstance(agent_expr, ast.Name):
+        target_id = _placeholder(mod, agent_expr.id)
+
+    builder["labels"][label] = target_id
+
+
+def _resolve_endpoint(expr: ast.expr, builder: dict, mod: ModuleIndex) -> str | None:
+    """Resolve a `add_edge` endpoint to a placeholder or already-known id."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return builder["labels"].get(expr.value)
+    if isinstance(expr, ast.Name):
+        return _placeholder(mod, expr.id)
+    return None
+
+
+def _gb_add_edge(call: ast.Call, builder: dict, mod: ModuleIndex, graph: Graph) -> None:
+    args = call.args
+    if len(args) < 2:
+        return
+    src = _resolve_endpoint(args[0], builder, mod)
+    tgt = _resolve_endpoint(args[1], builder, mod)
+    if not src or not tgt:
+        graph.unresolved.append(
+            {"reason": "graph_edge endpoint", "file": str(mod.path), "line": call.lineno}
+        )
+        return
+
+    condition = None
+    for kw in call.keywords:
+        if kw.arg == "condition" and isinstance(kw.value, ast.Name):
+            condition = kw.value.id
+
+    graph.edges.append(
+        Edge(
+            id=f"{mod.fq_module}:graph:{call.lineno}",
+            source=src,
+            target=tgt,
+            kind="graph_edge",
+            meta={"condition": condition} if condition else {},
+        )
+    )
+
+
+def _gb_conditional(call: ast.Call, builder: dict, mod: ModuleIndex, graph: Graph) -> None:
+    """`gb.add_conditional_edges(src, router, {"case_a": "label_a", ...})`."""
+    args = call.args
+    if len(args) < 2:
+        return
+    src = _resolve_endpoint(args[0], builder, mod)
+    if not src:
+        return
+
+    router = args[1].id if isinstance(args[1], ast.Name) else None
+    mapping = args[2] if len(args) >= 3 else None
+    if isinstance(mapping, ast.Dict):
+        for k, v in zip(mapping.keys, mapping.values):
+            if isinstance(v, (ast.Constant,)) and isinstance(v.value, str):
+                tgt = builder["labels"].get(v.value)
+                if not tgt:
+                    continue
+                case = k.value if isinstance(k, ast.Constant) else None
+                graph.edges.append(
+                    Edge(
+                        id=f"{mod.fq_module}:cond:{call.lineno}:{case}",
+                        source=src,
+                        target=tgt,
+                        kind="graph_edge",
+                        meta={"router": router, "case": case, "dynamic": True},
+                    )
+                )
+    else:
+        graph.unresolved.append(
+            {"reason": "conditional mapping not literal", "file": str(mod.path), "line": call.lineno, "router": router}
+        )
+
+
+def _gb_entry_point(call: ast.Call, builder: dict, mod: ModuleIndex, graph: Graph) -> None:
+    if not call.args:
+        return
+    arg = call.args[0]
+    if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+        return
+    tgt = builder["labels"].get(arg.value)
+    if not tgt:
+        return
+    pending = getattr(graph, "_entry_pending", None)
+    if pending is None:
+        pending = []
+        # Pydantic BaseModel disallows unknown attrs by default; assign via __dict__.
+        object.__setattr__(graph, "_entry_pending", pending)
+    pending.append(tgt)
+
+
 # ---- Pass 4: cross-file resolver -----------------------------------------
 
 
@@ -376,17 +544,36 @@ def _resolve_cross_file(modules: list[ModuleIndex], graph: Graph) -> None:
 
         return None
 
+    def _resolve_placeholder(value: str) -> str | None:
+        payload = value[len(PLACEHOLDER_PREFIX):]
+        module_fq, local = payload.split("::", 1)
+        return lookup(module_fq, local)
+
     for edge in graph.edges:
-        if edge.target.startswith(PLACEHOLDER_PREFIX):
-            payload = edge.target[len(PLACEHOLDER_PREFIX):]
-            module_fq, local = payload.split("::", 1)
-            resolved = lookup(module_fq, local)
-            if resolved:
-                edge.target = resolved
-            else:
-                graph.unresolved.append(
-                    {"edge": edge.id, "reason": "symbol not found", "module": module_fq, "symbol": local}
-                )
+        for endpoint in ("source", "target"):
+            val = getattr(edge, endpoint)
+            if val.startswith(PLACEHOLDER_PREFIX):
+                resolved = _resolve_placeholder(val)
+                if resolved:
+                    setattr(edge, endpoint, resolved)
+                else:
+                    payload = val[len(PLACEHOLDER_PREFIX):]
+                    module_fq, local = payload.split("::", 1)
+                    graph.unresolved.append(
+                        {"edge": edge.id, "endpoint": endpoint, "reason": "symbol not found",
+                         "module": module_fq, "symbol": local}
+                    )
+
+    # Apply pending entry-point markers now that placeholders resolved.
+    for pending in list(getattr(graph, "_entry_pending", []) or []):
+        target = pending
+        if target.startswith(PLACEHOLDER_PREFIX):
+            resolved = _resolve_placeholder(target)
+            target = resolved or target
+        for n in graph.nodes:
+            if n.id == target:
+                n.meta["entry_point"] = True
+                break
 
     # Resolve AgentTool wraps_ref meta too.
     for node in graph.nodes:

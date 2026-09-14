@@ -10,6 +10,7 @@ ROOT_ABS = Path(__file__).parent / "fixtures" / "root_absolute"
 CYCLE = Path(__file__).parent / "fixtures" / "import_cycle"
 SHARED_CB = Path(__file__).parent / "fixtures" / "shared_callback"
 MALFORMED = Path(__file__).parent / "fixtures" / "malformed"
+GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
 
 
 def _by_kind(graph, kind):
@@ -135,3 +136,29 @@ def test_malformed_file_skipped_good_still_parsed():
     g = parse_path(MALFORMED)
     names = {n.name for n in _by_kind(g, "llm_agent")}
     assert names == {"good"}
+
+
+def test_graph_api_linear_edge():
+    g = parse_path(GRAPH_API)
+    planner = _find(_by_kind(g, "llm_agent"), "planner")
+    approver = _find(_by_kind(g, "llm_agent"), "approver")
+    edges = [e for e in g.edges if e.kind == "graph_edge"]
+    assert any(e.source == planner.id and e.target == approver.id for e in edges)
+
+
+def test_graph_api_conditional_edges():
+    g = parse_path(GRAPH_API)
+    approver = _find(_by_kind(g, "llm_agent"), "approver")
+    publisher = _find(_by_kind(g, "llm_agent"), "publisher")
+    rejector = _find(_by_kind(g, "llm_agent"), "rejector")
+    cond = [e for e in g.edges if e.kind == "graph_edge" and e.source == approver.id and e.meta.get("case")]
+    targets = {e.target: e.meta.get("case") for e in cond}
+    assert targets[publisher.id] == "approved"
+    assert targets[rejector.id] == "rejected"
+    assert all(e.meta.get("router") == "route" for e in cond)
+
+
+def test_graph_api_entry_point():
+    g = parse_path(GRAPH_API)
+    planner = _find(_by_kind(g, "llm_agent"), "planner")
+    assert planner.meta.get("entry_point") is True
