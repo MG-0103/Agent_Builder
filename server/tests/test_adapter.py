@@ -278,8 +278,8 @@ def test_dynamic_tools_unresolvable_marked():
     g = parse_path(DYNAMIC_TOOLS)
     via_dyn = _find(g.nodes, "via_dyn")
     assert any(
-        u.get("agent") == via_dyn.id and u.get("field") == "tools"
-        for u in g.unresolved
+        w.get("kind") == "dynamic_tools" and w.get("agent") == via_dyn.id
+        for w in g.warnings
     )
 
 
@@ -315,3 +315,27 @@ def test_class_based_sub_agents_from_instantiation_still_work():
     w = _find(g.nodes, "writer")
     owns = [e for e in g.edges if e.kind == "owns_subagent" and e.source == pipeline.id]
     assert {e.target for e in owns} == {r.id, w.id}
+
+
+def test_node_ids_are_stable_no_line_suffix():
+    import re
+    g = parse_path(FIXTURE)
+    for n in g.nodes:
+        if n.kind == "callback":
+            continue  # callbacks id already stable via name
+        if n.name.startswith("anon_"):
+            continue  # anonymous fallback intentionally keeps line
+        assert not re.search(r":\d+$", n.id), f"unstable id: {n.id}"
+
+
+def test_node_ids_stable_across_reparse():
+    g1 = parse_path(FIXTURE)
+    g2 = parse_path(FIXTURE)
+    ids1 = sorted(n.id for n in g1.nodes)
+    ids2 = sorted(n.id for n in g2.nodes)
+    assert ids1 == ids2
+
+
+def test_malformed_file_recorded_as_warning():
+    g = parse_path(MALFORMED)
+    assert any(w.get("kind") == "syntax_error" for w in g.warnings)

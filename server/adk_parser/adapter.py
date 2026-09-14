@@ -276,7 +276,10 @@ def parse_path(root: str | Path) -> Graph:
     for py in _iter_python_files(root):
         try:
             tree = ast.parse(py.read_text(), filename=str(py))
-        except SyntaxError:
+        except SyntaxError as e:
+            graph.warnings.append(
+                {"kind": "syntax_error", "file": str(py), "line": e.lineno, "msg": str(e.msg)}
+            )
             continue
         fq = _module_fq(root, py)
         is_pkg = py.name == "__init__.py"
@@ -340,7 +343,7 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
 
         agent_local = _top_level_assign_name(mod.tree, node)
         name = _kwarg_str(effective, "name") or agent_local or f"anon_{node.lineno}"
-        agent_id = f"{mod.fq_module or mod.path.name}:{name}:{node.lineno}"
+        agent_id = _stable_id(graph, f"{mod.fq_module or mod.path.name}:agent:{name}")
 
         meta: dict = {"class": cls, "model": _kwarg_str(effective, "model")}
         output_key = _kwarg_str(effective, "output_key")
@@ -378,6 +381,17 @@ def _kwarg_str(call: ast.Call, name: str) -> str | None:
     if isinstance(val, ast.Constant) and isinstance(val.value, str):
         return val.value
     return None
+
+
+def _stable_id(graph: Graph, base: str) -> str:
+    """Return base, appending a counter if that id already exists."""
+    used = {n.id for n in graph.nodes}
+    if base not in used:
+        return base
+    i = 2
+    while f"{base}#{i}" in used:
+        i += 1
+    return f"{base}#{i}"
 
 
 def _placeholder(mod: ModuleIndex, local_name: str) -> str:
@@ -427,13 +441,14 @@ def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph
         return
     elts = _resolve_tool_list(tools, mod)
     if elts is None:
-        graph.unresolved.append(
-            {"agent": agent_id, "field": "tools", "reason": "non-literal", "file": str(mod.path), "line": call.lineno}
+        graph.warnings.append(
+            {"kind": "dynamic_tools", "agent": agent_id, "file": str(mod.path), "line": call.lineno,
+             "hint": "runtime probe recommended"}
         )
         return
     for i, elt in enumerate(elts):
         tool_id, tool_node, edge_kind = _resolve_tool_elt(elt, mod, i)
-        if tool_node:
+        if tool_node and not any(n.id == tool_id for n in graph.nodes):
             graph.nodes.append(tool_node)
         graph.edges.append(
             Edge(
@@ -539,7 +554,7 @@ def _resolve_tool_elt(elt: ast.expr, mod: ModuleIndex, idx: int) -> tuple[str, N
                 target = _ref_placeholder(wrapped, mod)
                 if target:
                     symbol = wrapped.id if isinstance(wrapped, ast.Name) else ".".join(_attr_chain(wrapped) or [])
-                    tid = f"{mod.fq_module}:agent_as_tool:{symbol}:{elt.lineno}"
+                    tid = f"{mod.fq_module}:agent_as_tool:{symbol}"
                     node = Node(
                         id=tid,
                         kind="agent_as_tool",
