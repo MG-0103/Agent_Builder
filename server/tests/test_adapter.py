@@ -12,6 +12,7 @@ SHARED_CB = Path(__file__).parent / "fixtures" / "shared_callback"
 MALFORMED = Path(__file__).parent / "fixtures" / "malformed"
 GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
 CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
+CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
 
 
 def _by_kind(graph, kind):
@@ -184,3 +185,17 @@ def test_custom_agent_base_agent_subclass():
     c = _find(g.nodes, "c")
     assert c.kind == "custom_agent"
     assert c.meta["class"] == "MyThing"
+
+
+def test_custom_agent_cross_file_direct():
+    g = parse_path(CUSTOM_CROSS)
+    r = _find(g.nodes, "r")
+    assert r.kind == "llm_agent"
+    assert r.meta["class"] == "Reviewer"
+
+
+def test_custom_agent_cross_file_transitive():
+    g = parse_path(CUSTOM_CROSS)
+    d = _find(g.nodes, "d")
+    assert d.kind == "llm_agent"
+    assert d.meta["class"] == "DeepReviewer"

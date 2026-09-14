@@ -124,38 +124,62 @@ def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> 
     return adk, imp
 
 
-def _base_kind(base: ast.expr, mod: ModuleIndex) -> str | None:
-    """Resolve a class base to an agent kind, if any."""
-    if isinstance(base, ast.Name):
-        qual = mod.adk_aliases.get(base.id)
-        if qual:
-            short = qual.rsplit(".", 1)[-1]
-            if short in AGENT_CLASSES:
-                return AGENT_CLASSES[short]
-        # Local custom class already resolved.
-        if base.id in mod.custom_agents:
-            return mod.custom_agents[base.id]
-    elif isinstance(base, ast.Attribute):
-        if base.attr in AGENT_CLASSES:
-            return AGENT_CLASSES[base.attr]
+def _resolve_name_kind(
+    name: str,
+    mod: ModuleIndex,
+    modules_by_fq: dict[str, ModuleIndex],
+    seen: set[tuple[str, str]] | None = None,
+) -> str | None:
+    """Chase a base-class name through ADK aliases, local classes, and imports."""
+    seen = seen or set()
+    key = (mod.fq_module, name)
+    if key in seen:
+        return None
+    seen = seen | {key}
+
+    qual = mod.adk_aliases.get(name)
+    if qual:
+        short = qual.rsplit(".", 1)[-1]
+        if short in AGENT_CLASSES:
+            return AGENT_CLASSES[short]
+    if name in mod.custom_agents:
+        return mod.custom_agents[name]
+    if name in mod.imports:
+        src_mod, src_name = mod.imports[name]
+        target = modules_by_fq.get(src_mod)
+        if target:
+            return _resolve_name_kind(src_name, target, modules_by_fq, seen)
     return None
 
 
-def _index_custom_agent_classes(mod: ModuleIndex) -> None:
-    """Populate mod.custom_agents. Fixed-point over ClassDefs for transitive bases."""
-    classdefs = [n for n in mod.tree.body if isinstance(n, ast.ClassDef)]
+def _resolve_base_kind(
+    base: ast.expr, mod: ModuleIndex, modules_by_fq: dict[str, ModuleIndex]
+) -> str | None:
+    if isinstance(base, ast.Name):
+        return _resolve_name_kind(base.id, mod, modules_by_fq)
+    if isinstance(base, ast.Attribute) and base.attr in AGENT_CLASSES:
+        return AGENT_CLASSES[base.attr]
+    return None
+
+
+def _index_custom_agent_classes(modules: list[ModuleIndex]) -> None:
+    """Global fixed-point across all modules; chases bases through imports."""
+    modules_by_fq = {m.fq_module: m for m in modules}
     changed = True
     while changed:
         changed = False
-        for cls in classdefs:
-            if cls.name in mod.custom_agents:
-                continue
-            for base in cls.bases:
-                kind = _base_kind(base, mod)
-                if kind:
-                    mod.custom_agents[cls.name] = kind
-                    changed = True
-                    break
+        for mod in modules:
+            for cls in mod.tree.body:
+                if not isinstance(cls, ast.ClassDef):
+                    continue
+                if cls.name in mod.custom_agents:
+                    continue
+                for base in cls.bases:
+                    kind = _resolve_base_kind(base, mod, modules_by_fq)
+                    if kind:
+                        mod.custom_agents[cls.name] = kind
+                        changed = True
+                        break
 
 
 def _resolve_call_name(call: ast.Call, aliases: dict[str, str]) -> str | None:
@@ -185,11 +209,11 @@ def parse_path(root: str | Path) -> Graph:
         adk, imp = _build_import_tables(tree, fq, is_pkg)
         modules.append(ModuleIndex(path=py, fq_module=fq, is_package=is_pkg, tree=tree, adk_aliases=adk, imports=imp))
 
-    for mod in modules:
-        _index_custom_agent_classes(mod)
+    _index_custom_agent_classes(modules)
+    modules_by_fq = {m.fq_module: m for m in modules}
 
     for mod in modules:
-        _extract_agents(mod, graph)
+        _extract_agents(mod, graph, modules_by_fq)
 
     for mod in modules:
         _extract_graph_builders(mod, graph)
@@ -207,7 +231,7 @@ def _top_level_assign_name(tree: ast.Module, call: ast.Call) -> str | None:
     return None
 
 
-def _extract_agents(mod: ModuleIndex, graph: Graph) -> None:
+def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, ModuleIndex]) -> None:
     for node in ast.walk(mod.tree):
         if not isinstance(node, ast.Call):
             continue
@@ -215,9 +239,9 @@ def _extract_agents(mod: ModuleIndex, graph: Graph) -> None:
         kind: str | None = None
         if cls in AGENT_CLASSES:
             kind = AGENT_CLASSES[cls]
-        elif isinstance(node.func, ast.Name) and node.func.id in mod.custom_agents:
+        elif isinstance(node.func, ast.Name):
             cls = node.func.id
-            kind = mod.custom_agents[cls]
+            kind = _resolve_name_kind(cls, mod, modules_by_fq)
         if not kind:
             continue
 
