@@ -16,6 +16,7 @@ CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
 ATTR_CHAIN = Path(__file__).parent / "fixtures" / "attr_chain"
 STATE_FLOW = Path(__file__).parent / "fixtures" / "state_flow"
 DYNAMIC_TOOLS = Path(__file__).parent / "fixtures" / "dynamic_tools"
+CLASS_BASED = Path(__file__).parent / "fixtures" / "class_based"
 
 
 def _by_kind(graph, kind):
@@ -280,3 +281,37 @@ def test_dynamic_tools_unresolvable_marked():
         u.get("agent") == via_dyn.id and u.get("field") == "tools"
         for u in g.unresolved
     )
+
+
+def test_class_based_tools_from_super_init():
+    g = parse_path(CLASS_BASED)
+    r = _find(g.nodes, "researcher")
+    tool_edges = [e for e in g.edges if e.kind == "uses_tool" and e.source == r.id]
+    targets = {next(n.name for n in g.nodes if n.id == e.target) for e in tool_edges}
+    assert targets == {"search", "summarize"}
+
+
+def test_class_based_callback_from_super_init():
+    g = parse_path(CLASS_BASED)
+    r = _find(g.nodes, "researcher")
+    hooks = [e for e in g.edges if e.kind == "hook" and e.source == r.id]
+    assert len(hooks) == 1
+
+
+def test_class_based_output_key_and_state_flow():
+    g = parse_path(CLASS_BASED)
+    r = _find(g.nodes, "researcher")
+    w = _find(g.nodes, "writer")
+    assert r.meta.get("output_key") == "notes"
+    edges = [e for e in g.edges if e.kind == "shares_state" and e.source == r.id and e.target == w.id]
+    assert len(edges) == 1
+    assert edges[0].meta["key"] == "notes"
+
+
+def test_class_based_sub_agents_from_instantiation_still_work():
+    g = parse_path(CLASS_BASED)
+    pipeline = _find(g.nodes, "pipeline")
+    r = _find(g.nodes, "researcher")
+    w = _find(g.nodes, "writer")
+    owns = [e for e in g.edges if e.kind == "owns_subagent" and e.source == pipeline.id]
+    assert {e.target for e in owns} == {r.id, w.id}

@@ -57,6 +57,8 @@ class ModuleIndex:
     custom_agents: dict[str, str] = field(default_factory=dict)
     # `import x.y[.z]` / `import x.y as m` -> local_name -> module fq
     module_imports: dict[str, str] = field(default_factory=dict)
+    # local class name -> super().__init__(...) ast.Call inside its __init__
+    class_super_kwargs: dict[str, ast.Call] = field(default_factory=dict)
 
 
 def _iter_python_files(root: Path) -> Iterable[Path]:
@@ -173,6 +175,67 @@ def _resolve_base_kind(
     return None
 
 
+def _find_super_init(cls_def: ast.ClassDef) -> ast.Call | None:
+    for item in cls_def.body:
+        if not (isinstance(item, ast.FunctionDef) and item.name == "__init__"):
+            continue
+        for stmt in ast.walk(item):
+            if not isinstance(stmt, ast.Call):
+                continue
+            fn = stmt.func
+            if (
+                isinstance(fn, ast.Attribute)
+                and fn.attr == "__init__"
+                and isinstance(fn.value, ast.Call)
+                and isinstance(fn.value.func, ast.Name)
+                and fn.value.func.id == "super"
+            ):
+                return stmt
+    return None
+
+
+def _index_class_super_kwargs(modules: list[ModuleIndex]) -> None:
+    for mod in modules:
+        for cls in mod.tree.body:
+            if isinstance(cls, ast.ClassDef):
+                sup = _find_super_init(cls)
+                if sup is not None:
+                    mod.class_super_kwargs[cls.name] = sup
+
+
+def _lookup_class_super(
+    class_name: str,
+    mod: ModuleIndex,
+    modules_by_fq: dict[str, ModuleIndex],
+    seen: set[tuple[str, str]] | None = None,
+) -> ast.Call | None:
+    seen = seen or set()
+    key = (mod.fq_module, class_name)
+    if key in seen:
+        return None
+    seen = seen | {key}
+    if class_name in mod.class_super_kwargs:
+        return mod.class_super_kwargs[class_name]
+    if class_name in mod.imports:
+        src_mod, src_name = mod.imports[class_name]
+        target = modules_by_fq.get(src_mod)
+        if target:
+            return _lookup_class_super(src_name, target, modules_by_fq, seen)
+    return None
+
+
+def _merge_kwargs(inst: ast.Call, sup: ast.Call | None) -> ast.Call:
+    """Return a synthetic Call whose keywords are `inst`'s union `sup`'s
+    (instantiation wins on conflict)."""
+    if sup is None:
+        return inst
+    inst_names = {k.arg for k in inst.keywords}
+    merged = list(inst.keywords) + [k for k in sup.keywords if k.arg not in inst_names]
+    new = ast.Call(func=inst.func, args=list(inst.args), keywords=merged)
+    ast.copy_location(new, inst)
+    return new
+
+
 def _index_custom_agent_classes(modules: list[ModuleIndex]) -> None:
     """Global fixed-point across all modules; chases bases through imports."""
     modules_by_fq = {m.fq_module: m for m in modules}
@@ -225,6 +288,7 @@ def parse_path(root: str | Path) -> Graph:
             )
         )
 
+    _index_class_super_kwargs(modules)
     _index_custom_agent_classes(modules)
     modules_by_fq = {m.fq_module: m for m in modules}
 
@@ -254,21 +318,33 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
             continue
         cls = _resolve_call_name(node, mod.adk_aliases)
         kind: str | None = None
+        custom_class: str | None = None
         if cls in AGENT_CLASSES:
             kind = AGENT_CLASSES[cls]
         elif isinstance(node.func, ast.Name):
             cls = node.func.id
             kind = _resolve_name_kind(cls, mod, modules_by_fq)
+            if kind:
+                custom_class = cls
         if not kind:
             continue
 
+        # For custom-class instantiations declared in the same module, merge
+        # in kwargs from the class's own super().__init__ call. Cross-file
+        # class bodies aren't merged: their kwarg exprs reference symbols in
+        # a different module's scope, which the extractors here don't switch.
+        effective = node
+        if custom_class and custom_class in mod.class_super_kwargs:
+            sup = mod.class_super_kwargs[custom_class]
+            effective = _merge_kwargs(node, sup)
+
         agent_local = _top_level_assign_name(mod.tree, node)
-        name = _kwarg_str(node, "name") or agent_local or f"anon_{node.lineno}"
+        name = _kwarg_str(effective, "name") or agent_local or f"anon_{node.lineno}"
         agent_id = f"{mod.fq_module or mod.path.name}:{name}:{node.lineno}"
 
-        meta: dict = {"class": cls, "model": _kwarg_str(node, "model")}
-        output_key = _kwarg_str(node, "output_key")
-        instruction = _kwarg_str(node, "instruction")
+        meta: dict = {"class": cls, "model": _kwarg_str(effective, "model")}
+        output_key = _kwarg_str(effective, "output_key")
+        instruction = _kwarg_str(effective, "instruction")
         if output_key:
             meta["output_key"] = output_key
         if instruction:
@@ -285,9 +361,9 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
         if agent_local:
             mod.symbols[agent_local] = agent_id
 
-        _extract_tools(node, agent_id, mod, graph)
-        _extract_sub_agents(node, agent_id, mod, graph)
-        _extract_callbacks(node, agent_id, mod, graph)
+        _extract_tools(effective, agent_id, mod, graph)
+        _extract_sub_agents(effective, agent_id, mod, graph)
+        _extract_callbacks(effective, agent_id, mod, graph)
 
 
 def _kwarg(call: ast.Call, name: str) -> ast.expr | None:
