@@ -11,6 +11,7 @@ CYCLE = Path(__file__).parent / "fixtures" / "import_cycle"
 SHARED_CB = Path(__file__).parent / "fixtures" / "shared_callback"
 MALFORMED = Path(__file__).parent / "fixtures" / "malformed"
 GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
+CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
 
 
 def _by_kind(graph, kind):
@@ -162,3 +163,24 @@ def test_graph_api_entry_point():
     g = parse_path(GRAPH_API)
     planner = _find(_by_kind(g, "llm_agent"), "planner")
     assert planner.meta.get("entry_point") is True
+
+
+def test_custom_agent_direct_llm_subclass():
+    g = parse_path(CUSTOM)
+    r = _find(g.nodes, "r")
+    assert r.kind == "llm_agent"
+    assert r.meta["class"] == "Reviewer"
+
+
+def test_custom_agent_transitive_subclass():
+    g = parse_path(CUSTOM)
+    d = _find(g.nodes, "d")
+    assert d.kind == "llm_agent"
+    assert d.meta["class"] == "DeepReviewer"
+
+
+def test_custom_agent_base_agent_subclass():
+    g = parse_path(CUSTOM)
+    c = _find(g.nodes, "c")
+    assert c.kind == "custom_agent"
+    assert c.meta["class"] == "MyThing"

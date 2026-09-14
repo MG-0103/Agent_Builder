@@ -26,6 +26,7 @@ AGENT_CLASSES = {
     "SequentialAgent": "sequential_agent",
     "ParallelAgent": "parallel_agent",
     "LoopAgent": "loop_agent",
+    "BaseAgent": "custom_agent",
 }
 
 GRAPH_BUILDER_CLASSES = {"Graph", "Workflow", "StateGraph"}
@@ -52,6 +53,8 @@ class ModuleIndex:
     imports: dict[str, tuple[str, str]] = field(default_factory=dict)
     # local top-level name -> node_id (populated during extraction)
     symbols: dict[str, str] = field(default_factory=dict)
+    # local class name -> resolved agent kind (populated pre-extraction)
+    custom_agents: dict[str, str] = field(default_factory=dict)
 
 
 def _iter_python_files(root: Path) -> Iterable[Path]:
@@ -121,6 +124,40 @@ def _build_import_tables(tree: ast.Module, fq_module: str, is_package: bool) -> 
     return adk, imp
 
 
+def _base_kind(base: ast.expr, mod: ModuleIndex) -> str | None:
+    """Resolve a class base to an agent kind, if any."""
+    if isinstance(base, ast.Name):
+        qual = mod.adk_aliases.get(base.id)
+        if qual:
+            short = qual.rsplit(".", 1)[-1]
+            if short in AGENT_CLASSES:
+                return AGENT_CLASSES[short]
+        # Local custom class already resolved.
+        if base.id in mod.custom_agents:
+            return mod.custom_agents[base.id]
+    elif isinstance(base, ast.Attribute):
+        if base.attr in AGENT_CLASSES:
+            return AGENT_CLASSES[base.attr]
+    return None
+
+
+def _index_custom_agent_classes(mod: ModuleIndex) -> None:
+    """Populate mod.custom_agents. Fixed-point over ClassDefs for transitive bases."""
+    classdefs = [n for n in mod.tree.body if isinstance(n, ast.ClassDef)]
+    changed = True
+    while changed:
+        changed = False
+        for cls in classdefs:
+            if cls.name in mod.custom_agents:
+                continue
+            for base in cls.bases:
+                kind = _base_kind(base, mod)
+                if kind:
+                    mod.custom_agents[cls.name] = kind
+                    changed = True
+                    break
+
+
 def _resolve_call_name(call: ast.Call, aliases: dict[str, str]) -> str | None:
     """Return the ADK short class name (e.g. 'LlmAgent'), honoring `as` aliases."""
     func = call.func
@@ -149,6 +186,9 @@ def parse_path(root: str | Path) -> Graph:
         modules.append(ModuleIndex(path=py, fq_module=fq, is_package=is_pkg, tree=tree, adk_aliases=adk, imports=imp))
 
     for mod in modules:
+        _index_custom_agent_classes(mod)
+
+    for mod in modules:
         _extract_agents(mod, graph)
 
     for mod in modules:
@@ -172,12 +212,17 @@ def _extract_agents(mod: ModuleIndex, graph: Graph) -> None:
         if not isinstance(node, ast.Call):
             continue
         cls = _resolve_call_name(node, mod.adk_aliases)
-        if cls not in AGENT_CLASSES:
+        kind: str | None = None
+        if cls in AGENT_CLASSES:
+            kind = AGENT_CLASSES[cls]
+        elif isinstance(node.func, ast.Name) and node.func.id in mod.custom_agents:
+            cls = node.func.id
+            kind = mod.custom_agents[cls]
+        if not kind:
             continue
 
         agent_local = _top_level_assign_name(mod.tree, node)
         name = _kwarg_str(node, "name") or agent_local or f"anon_{node.lineno}"
-        kind = AGENT_CLASSES[cls]
         agent_id = f"{mod.fq_module or mod.path.name}:{name}:{node.lineno}"
 
         graph.nodes.append(
