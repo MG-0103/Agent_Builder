@@ -30,3 +30,22 @@ def test_cli_emit(tmp_path):
     src = out.read_text()
     assert "LlmAgent" in src
     assert "researcher" in src
+
+
+def test_cli_emit_layout(tmp_path):
+    MULTI = Path(__file__).parent / "fixtures" / "multi_file"
+    out = tmp_path / "generated"
+    rc = main([str(MULTI), "--emit-layout", "-o", str(out)])
+    assert rc == 0
+    # multi_file/pkg/pipeline.py should exist under the out dir.
+    written = list(out.rglob("*.py"))
+    assert any(p.name == "pipeline.py" for p in written)
+    assert any(p.name == "researcher.py" for p in written)
+    for p in written:
+        assert "# region agentbuilder:generated" in p.read_text()
+
+
+def test_cli_emit_layout_requires_out(tmp_path, capsys):
+    MULTI = Path(__file__).parent / "fixtures" / "multi_file"
+    rc = main([str(MULTI), "--emit-layout"])
+    assert rc == 2

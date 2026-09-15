@@ -1,11 +1,19 @@
 """Graph → ADK Python source emitter.
 
-Flat single-file emit: one Python module reproducing the workflow that the
-static extractor read out of a repo. Preserving original file layout is a
-future step; the goal here is to prove the graph fully captures the
-semantics, via a parse → emit → parse round-trip.
+Two output modes:
 
-Non-round-trippable node kinds (raise `EmitSkipped` when hit):
+- ``emit_python(graph) -> str``: single-file emit. One Python module
+  reproducing the whole workflow. Used to prove parse → emit → parse
+  parity on fixtures.
+- ``emit_layout(graph) -> dict[str, str]``: layout-preserving emit.
+  Groups nodes by their original ``provenance.file`` and emits one
+  module per source file, with cross-file imports computed from the
+  graph. Generated code is wrapped in
+  ``# region agentbuilder:generated`` markers; ``apply_region()`` merges
+  it into existing files without touching hand-edited code outside the
+  region.
+
+Non-round-trippable node kinds (raise ``EmitSkipped`` when hit):
 - ``custom_agent``: the user's subclass isn't importable from ADK.
 - ``tool_mcp``: external toolset with runtime-only shape.
 - tool_function nodes marked ``meta.dynamic`` or named ``<unresolved>``.
@@ -14,9 +22,14 @@ Non-round-trippable node kinds (raise `EmitSkipped` when hit):
 from __future__ import annotations
 
 from collections import defaultdict
+from pathlib import Path
 from typing import Iterable
 
 from .schema import Edge, Graph, Node
+
+
+REGION_START = "# region agentbuilder:generated"
+REGION_END = "# endregion agentbuilder:generated"
 
 
 class EmitSkipped(Exception):
@@ -329,3 +342,227 @@ def emit_python(graph: Graph) -> str:
     body.extend(_graph_builder_blocks(graph, local_of))
 
     return "\n".join(header + body).rstrip() + "\n"
+
+
+# ---- Layout-preserving emit ---------------------------------------------
+
+
+def _fq_module_of(node: Node) -> str:
+    """Extract the fq_module the adapter used for this node.
+
+    Node ids follow ``<fq_module>:<kind_short>:<name>``. Splitting from the
+    right on ``:`` twice recovers the module. Nodes we can't emit
+    (``unresolved_tool``, malformed) never reach layout emit.
+    """
+    parts = node.id.rsplit(":", 2)
+    return parts[0] if len(parts) == 3 else node.id
+
+
+def _relpath_of(node: Node, source_root: Path) -> str | None:
+    if node.provenance is None:
+        return None
+    try:
+        return str(Path(node.provenance.file).resolve().relative_to(source_root))
+    except ValueError:
+        return None
+
+
+def apply_region(existing: str, generated_body: str) -> str:
+    """Splice ``generated_body`` into ``existing`` inside a region block.
+
+    - Replaces any single existing ``REGION_START`` .. ``REGION_END`` block
+      (inclusive) with a freshly wrapped one.
+    - If no region is present, appends a new one at the end.
+    - Content outside the region is preserved verbatim.
+    """
+    block = f"{REGION_START}\n{generated_body.rstrip()}\n{REGION_END}\n"
+    if REGION_START in existing and REGION_END in existing:
+        start = existing.index(REGION_START)
+        end = existing.index(REGION_END, start) + len(REGION_END)
+        # Consume the newline right after REGION_END if present.
+        if end < len(existing) and existing[end] == "\n":
+            end += 1
+        return existing[:start] + block + existing[end:]
+    if not existing:
+        return block
+    sep = "" if existing.endswith("\n") else "\n"
+    return f"{existing}{sep}\n{block}"
+
+
+def _emit_file(
+    rel_path: str,
+    module_nodes: dict[str, list[Node]],
+    node_module: dict[str, str],
+    node_local: dict[str, str],
+    graph: Graph,
+    nodes_by_id: dict[str, Node],
+    ordered_agent_ids: list[str],
+) -> str:
+    """Emit the body of one module (everything that goes inside the region).
+
+    ``module_nodes[fq]`` = nodes provenance-owned by module ``fq``.
+    ``node_module[nid]`` = fq_module of a node's provenance file.
+    ``node_local[nid]``  = local Python name used for that node.
+    """
+    fq = _relpath_to_fq(rel_path)
+    owned = module_nodes.get(fq, [])
+    owned_ids = {n.id for n in owned}
+
+    # Split owned nodes by kind, preserving global emit order.
+    tool_nodes = [n for n in owned if n.kind == "tool_function"]
+    cb_nodes = [n for n in owned if n.kind == "callback"]
+    agent_ids_here = [aid for aid in ordered_agent_ids if aid in owned_ids]
+
+    # Cross-file imports: any edge from an agent in this file to a target
+    # node whose module differs from ours becomes a `from <fq> import <local>`.
+    # `agent_as_tool` nodes themselves live in the file that references them
+    # (that's how the adapter tagged their provenance), but they wrap an agent
+    # that may live in another file — walk `meta.wraps` for that.
+    imports_by_module: dict[str, set[str]] = defaultdict(set)
+
+    def _import(target_id: str) -> None:
+        target_mod = node_module.get(target_id)
+        if not target_mod or target_mod == fq:
+            return
+        local = node_local.get(target_id)
+        if not local:
+            return
+        imports_by_module[target_mod].add(local)
+
+    for aid in agent_ids_here:
+        for e in graph.edges:
+            if e.source != aid:
+                continue
+            if e.target not in nodes_by_id:
+                continue
+            if e.kind in ("uses_tool", "wraps_agent", "owns_subagent"):
+                _import(e.target)
+                if e.kind == "wraps_agent":
+                    wrapped = nodes_by_id[e.target].meta.get("wraps")
+                    if isinstance(wrapped, str) and wrapped in nodes_by_id:
+                        _import(wrapped)
+            elif e.kind == "hook":
+                _import(e.target)
+
+    # ADK class imports, only for what this file uses.
+    agent_classes = sorted(
+        {_AGENT_CLASS[nodes_by_id[aid].kind] for aid in agent_ids_here}
+    )
+    tool_classes: set[str] = set()
+    for aid in agent_ids_here:
+        for e in graph.edges:
+            if e.source == aid and e.kind == "wraps_agent" and e.target in nodes_by_id:
+                tool_classes.add("AgentTool")
+    file_has_graph_builder = any(
+        e.kind == "graph_edge" and _module_of_endpoint(e.source, node_module) == fq
+        for e in graph.edges
+    )
+
+    lines: list[str] = []
+    if agent_classes:
+        lines.append(f"from google.adk.agents import {', '.join(agent_classes)}")
+    if tool_classes:
+        lines.append(f"from google.adk.tools import {', '.join(sorted(tool_classes))}")
+    if file_has_graph_builder:
+        lines.append("from google.adk.workflows import Graph")
+    for target_mod in sorted(imports_by_module):
+        names = ", ".join(sorted(imports_by_module[target_mod]))
+        lines.append(f"from {target_mod} import {names}")
+    if lines:
+        lines.append("")
+
+    lines.extend(_emit_tool_stubs(tool_nodes))
+    lines.extend(_emit_callback_stubs(cb_nodes))
+
+    for aid in agent_ids_here:
+        node = nodes_by_id[aid]
+        local = node_local[aid]
+        call = _agent_call(node, graph.edges, nodes_by_id, node_local)
+        lines.append(f"{local} = {call}")
+        lines.append("")
+
+    # Graph builder blocks land in the file whose module owns the builder's
+    # first edge (there is no dedicated builder node in the schema today; a
+    # single-file placement is close enough for round-trip).
+    if file_has_graph_builder:
+        lines.extend(_graph_builder_blocks(graph, node_local))
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _module_of_endpoint(node_id: str, node_module: dict[str, str]) -> str | None:
+    return node_module.get(node_id)
+
+
+def _relpath_to_fq(rel_path: str) -> str:
+    """Turn ``pkg/researcher.py`` into ``pkg.researcher``; ``pkg/__init__.py``
+    into ``pkg``."""
+    p = Path(rel_path)
+    parts = list(p.parts)
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    else:
+        parts[-1] = p.stem
+    return ".".join(parts)
+
+
+def _fq_to_relpath(fq: str) -> str:
+    return "/".join(fq.split(".")) + ".py"
+
+
+def emit_layout(graph: Graph) -> dict[str, str]:
+    """Layout-preserving emit.
+
+    Returns a mapping of repo-relative path → the content of the file's
+    ``agentbuilder:generated`` region body. Callers merge each body into
+    the corresponding on-disk file via ``apply_region``.
+    """
+    nodes = _by_id(graph.nodes)
+
+    # Same guardrails as flat emit: refuse non-round-trippable shapes early.
+    if any(n.kind == "custom_agent" for n in graph.nodes):
+        raise EmitSkipped("custom_agent kinds present")
+    if any(n.kind == "tool_mcp" for n in graph.nodes):
+        raise EmitSkipped("tool_mcp present")
+    for w in graph.warnings:
+        if isinstance(w, dict) and w.get("kind") == "dynamic_tools":
+            raise EmitSkipped("dynamic_tools warning; parser gave up on a tool list")
+    for t in graph.nodes:
+        if t.kind == "tool_function" and t.name == "<unresolved>":
+            raise EmitSkipped("unresolved tool present")
+
+    agent_ids = [n.id for n in graph.nodes if n.kind in _AGENT_CLASS]
+    ordered_agent_ids = _topo_agents(agent_ids, graph.edges)
+
+    node_module: dict[str, str] = {n.id: _fq_module_of(n) for n in graph.nodes}
+    module_nodes: dict[str, list[Node]] = defaultdict(list)
+    for n in graph.nodes:
+        module_nodes[node_module[n.id]].append(n)
+
+    # Global local-name map, allocated in the same order as flat emit so
+    # cross-file imports have a stable name to import.
+    node_local: dict[str, str] = {}
+    for n in graph.nodes:
+        if n.kind == "tool_function":
+            _local_name(n, node_local)
+    for n in graph.nodes:
+        if n.kind == "callback":
+            _local_name(n, node_local)
+    for aid in ordered_agent_ids:
+        _local_name(nodes[aid], node_local)
+
+    files: dict[str, str] = {}
+    for fq in sorted(module_nodes):
+        rel = _fq_to_relpath(fq)
+        body = _emit_file(
+            rel_path=rel,
+            module_nodes=module_nodes,
+            node_module=node_module,
+            node_local=node_local,
+            graph=graph,
+            nodes_by_id=nodes,
+            ordered_agent_ids=ordered_agent_ids,
+        )
+        files[rel] = body
+
+    return files

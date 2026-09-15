@@ -129,12 +129,40 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 - `POST /emit` HTTP endpoint returns emitted source or 422 on skip.
 - `parse-agents ... --emit` CLI flag writes source instead of JSON.
 
-Not yet:
-- Regen-safe markers so hand-edited regions survive re-emit.
-- Layout-preserving emit (write back into original module files
-  rather than one flat file).
-- Codegen for custom_agent (needs class-scaffold emission) and MCP
-  toolset re-hydration.
+### Stage F polish ✅ (layout emit + regen markers)
+- `apply_region(existing, body)` splices a
+  `# region agentbuilder:generated` block into an existing file;
+  content outside the region is preserved verbatim, and re-emits
+  replace exactly one region (idempotent).
+- `emit_layout(graph) -> {rel_path: body}` groups nodes by
+  `provenance.file`, emits one module per source file, and
+  computes cross-file imports (`from pkg.researcher import
+  researcher`, etc.) from the graph edges.
+- Round-trip parity holds under layout emit on 5 fixtures
+  (simple_agent, multi_file, state_flow, shared_callback,
+  attr_chain).
+- Hand-edit preservation test: a file with hand-written code
+  above and below the region survives re-emit unchanged; the
+  region itself is replaced in place.
+- `POST /emit-layout` returns per-file merged content (or raw
+  region bodies via `merge=false`).
+- `parse-agents --emit-layout -o <dir>` writes files to disk,
+  merging with any existing content via `apply_region`.
+- Suite: 82 passed.
+
+Known limitation: tools defined in one module and imported by
+another get their `provenance.file` recorded at the *call site*
+by the adapter, so layout emit co-locates the function stub with
+the referring agent instead of preserving the original `tools.py`.
+Round-trip parity still holds (the emitted graph is
+self-consistent), but the file layout doesn't perfectly mirror
+the input. Fixing this needs a separate `defined_in` field on
+tool nodes.
+
+Still not done:
+- Codegen for `custom_agent` (needs class-scaffold emission) and
+  MCP toolset re-hydration.
+- Preserve original tool definition modules.
 
 ### Static extraction gaps (deferred, defensible via runtime probe)
 - Cross-file class-based construction (kwarg exprs resolve in the
@@ -153,8 +181,10 @@ Not yet:
 
 ## Recommended next order
 
-1. **Stage F polish** — layout-preserving emit + regen-safe
-   markers, so hand-edited code survives re-emit.
-2. **Stage C — Trace overlay**. High value but needs a real
-   running ADK repo to trace against; do it once real code lands.
+1. **Stage C — Trace overlay**. Highest correctness gain
+   remaining. Needs a real running ADK repo to trace against;
+   do it once real code lands.
+2. **Tool provenance fix** — track `defined_in` for
+   tool_function nodes so layout emit preserves the original
+   `tools.py` layout.
 3. Stage B tail + Stage D as needed.

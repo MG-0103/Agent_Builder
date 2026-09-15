@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from adk_parser import parse_path, run_probe, merge_runtime
-from adk_parser.codegen import EmitSkipped, emit_python
+from adk_parser.codegen import EmitSkipped, apply_region, emit_layout, emit_python
 
 app = FastAPI(title="AgentBuilder Parser")
 
@@ -90,6 +90,41 @@ def emit(req: EmitRequest):
     except EmitSkipped as e:
         raise HTTPException(status_code=422, detail=f"emit skipped: {e}")
     return {"source": source, "framework": graph.framework, "version": graph.version}
+
+
+class EmitLayoutRequest(BaseModel):
+    repo_path: str
+    # If True the endpoint reads each target file (if present under repo_path)
+    # and returns the merged result via apply_region. If False it returns
+    # region bodies only — the caller merges.
+    merge: bool = True
+
+
+@app.post("/emit-layout")
+def emit_layout_endpoint(req: EmitLayoutRequest):
+    root = Path(req.repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    graph = parse_path(root)
+    try:
+        bodies = emit_layout(graph)
+    except EmitSkipped as e:
+        raise HTTPException(status_code=422, detail=f"emit skipped: {e}")
+
+    files: dict[str, str] = {}
+    for rel, body in bodies.items():
+        if req.merge:
+            target = root / rel
+            existing = target.read_text() if target.exists() else ""
+            files[rel] = apply_region(existing, body)
+        else:
+            files[rel] = body
+    return {
+        "files": files,
+        "merged": req.merge,
+        "framework": graph.framework,
+        "version": graph.version,
+    }
 
 
 @app.get("/health")

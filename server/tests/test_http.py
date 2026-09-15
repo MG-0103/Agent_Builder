@@ -83,6 +83,24 @@ def test_emit_skipped_returns_422():
     assert r.status_code == 422
 
 
+def test_emit_layout_endpoint():
+    MULTI = Path(__file__).parent / "fixtures" / "multi_file"
+    r = client.post("/emit-layout", json={"repo_path": str(MULTI), "merge": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert any(rel.endswith("pipeline.py") for rel in body["files"])
+    assert any(rel.endswith("researcher.py") for rel in body["files"])
+
+
+def test_emit_layout_merges_when_asked():
+    MULTI = Path(__file__).parent / "fixtures" / "multi_file"
+    r = client.post("/emit-layout", json={"repo_path": str(MULTI), "merge": True})
+    assert r.status_code == 200
+    for _rel, content in r.json()["files"].items():
+        assert "# region agentbuilder:generated" in content
+        assert "# endregion agentbuilder:generated" in content
+
+
 def test_parse_with_entry_module_merges_probe():
     r = client.post("/parse", json={"repo_path": str(PROBE_FIXTURE), "entry_module": "agent"})
     assert r.status_code == 200
