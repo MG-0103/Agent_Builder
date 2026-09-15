@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from adk_parser import parse_path, run_probe, merge_runtime
+from adk_parser.codegen import EmitSkipped, emit_python
 
 app = FastAPI(title="AgentBuilder Parser")
 
@@ -72,6 +73,23 @@ def probe(req: ProbeRequest):
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
     return run_probe(root, req.entry_module, timeout=req.timeout)
+
+
+class EmitRequest(BaseModel):
+    repo_path: str
+
+
+@app.post("/emit")
+def emit(req: EmitRequest):
+    root = Path(req.repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    graph = parse_path(root)
+    try:
+        source = emit_python(graph)
+    except EmitSkipped as e:
+        raise HTTPException(status_code=422, detail=f"emit skipped: {e}")
+    return {"source": source, "framework": graph.framework, "version": graph.version}
 
 
 @app.get("/health")

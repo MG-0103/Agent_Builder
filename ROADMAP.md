@@ -113,11 +113,28 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
   fixed and `tsconfig.app.json` gets `ignoreDeprecations: "6.0"`
   so `npm run build` passes.
 
-### Stage F — Codegen (round-trip)
-- Graph → ADK Python emitter (Jinja templates).
-- Regen-safe markers for hand-edited regions.
-- Round-trip parity test: parse → emit → parse produces the same
-  graph.
+### Stage F — Codegen (round-trip) ✅ (flat emit)
+- `adk_parser/codegen.py`: graph → single-file ADK Python emitter.
+  Handles llm/sequential/parallel/loop agents, function tools,
+  `AgentTool` wrappers, callback fan-in, `sub_agents`, `output_key`,
+  and the `Graph()` builder API (add_node/add_edge/
+  add_conditional_edges).
+- `EmitSkipped` refuses non-round-trippable inputs: custom agent
+  subclasses, MCP toolsets, dynamic tool lists, unresolved refs.
+- Round-trip parity test (`tests/test_codegen.py`): parse → emit →
+  parse yields the same normalized graph on 9 fixtures
+  (simple_agent, multi_file, reexport, alias_import, root_absolute,
+  attr_chain, state_flow, graph_api, shared_callback). 70 tests
+  total pass.
+- `POST /emit` HTTP endpoint returns emitted source or 422 on skip.
+- `parse-agents ... --emit` CLI flag writes source instead of JSON.
+
+Not yet:
+- Regen-safe markers so hand-edited regions survive re-emit.
+- Layout-preserving emit (write back into original module files
+  rather than one flat file).
+- Codegen for custom_agent (needs class-scaffold emission) and MCP
+  toolset re-hydration.
 
 ### Static extraction gaps (deferred, defensible via runtime probe)
 - Cross-file class-based construction (kwarg exprs resolve in the
@@ -136,8 +153,8 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 
 ## Recommended next order
 
-1. **Stage F — Codegen + round-trip**. Proves parser correctness
-   end-to-end; unlocks the graph-as-source-of-truth workflow.
+1. **Stage F polish** — layout-preserving emit + regen-safe
+   markers, so hand-edited code survives re-emit.
 2. **Stage C — Trace overlay**. High value but needs a real
    running ADK repo to trace against; do it once real code lands.
 3. Stage B tail + Stage D as needed.

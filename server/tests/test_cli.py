@@ -21,3 +21,12 @@ def test_cli_stdout(capsys):
     out = capsys.readouterr().out
     payload = json.loads(out)
     assert payload["nodes"]
+
+
+def test_cli_emit(tmp_path):
+    out = tmp_path / "emitted.py"
+    rc = main([str(FIXTURE), "--emit", "-o", str(out)])
+    assert rc == 0
+    src = out.read_text()
+    assert "LlmAgent" in src
+    assert "researcher" in src

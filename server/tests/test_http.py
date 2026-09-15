@@ -67,6 +67,22 @@ def test_probe_endpoint():
     assert {"researcher", "writer", "pipeline"} <= names
 
 
+def test_emit_endpoint():
+    r = client.post("/emit", json={"repo_path": str(FIXTURE)})
+    assert r.status_code == 200
+    body = r.json()
+    assert "LlmAgent" in body["source"]
+    assert "researcher" in body["source"]
+
+
+def test_emit_skipped_returns_422():
+    r = client.post(
+        "/emit",
+        json={"repo_path": str(Path(__file__).parent / "fixtures" / "custom_agent")},
+    )
+    assert r.status_code == 422
+
+
 def test_parse_with_entry_module_merges_probe():
     r = client.post("/parse", json={"repo_path": str(PROBE_FIXTURE), "entry_module": "agent"})
     assert r.status_code == 200
