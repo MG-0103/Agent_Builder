@@ -12,13 +12,21 @@ from typing import Any
 from .schema import Edge, Graph, Node
 
 
-def run_probe(repo_path: str | Path, entry_module: str, timeout: float = 30.0) -> dict[str, Any]:
+def run_probe(
+    repo_path: str | Path,
+    entry_module: str,
+    timeout: float = 30.0,
+    entry_object: str | None = None,
+) -> dict[str, Any]:
     repo = Path(repo_path).expanduser().resolve()
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{repo}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    argv = [sys.executable, "-m", "adk_parser._inspector", entry_module]
+    if entry_object:
+        argv.append(entry_object)
     try:
         proc = subprocess.run(
-            [sys.executable, "-m", "adk_parser._inspector", entry_module],
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -90,17 +98,22 @@ def merge(graph: Graph, observed: dict[str, Any]) -> Graph:
                                      meta={"observed": True, "runtime_only": True}))
             name_to_id[tgt_name] = tgt
         key = (src, tgt, kind)
+        extra_meta: dict[str, Any] = {}
+        if kind == "hook" and re.get("phase"):
+            extra_meta["phase"] = re["phase"]
         if key in existing_edges:
             # Existing static edge; tag observed.
             for e in graph.edges:
                 if (e.source, e.target, e.kind) == key:
                     e.meta["observed"] = True
+                    if extra_meta:
+                        e.meta.setdefault("phase", extra_meta["phase"])
                     break
         else:
+            meta = {"observed": True, "runtime_only": True, **extra_meta}
             graph.edges.append(
                 Edge(id=f"{src}->{tgt}:{kind}:observed",
-                     source=src, target=tgt, kind=kind,
-                     meta={"observed": True, "runtime_only": True})
+                     source=src, target=tgt, kind=kind, meta=meta)
             )
             existing_edges.add(key)
 

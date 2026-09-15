@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from adk_parser import Trace, classify, parse_path, run_probe, merge_runtime
 from adk_parser.codegen import EmitSkipped, apply_region, emit_layout, emit_python
+from adk_parser.entry_candidates import rank_entry_candidates
 
 app = FastAPI(title="AgentBuilder Parser")
 
@@ -66,11 +67,13 @@ def _resolve_repo_path(raw: str) -> Path:
 class ParseRequest(BaseModel):
     repo_path: str
     entry_module: str | None = None  # If set, merge runtime probe into result.
+    entry_object: str | None = None  # Optional name of a factory / root inside entry_module.
 
 
 class ProbeRequest(BaseModel):
     repo_path: str
     entry_module: str
+    entry_object: str | None = None
     timeout: float = 30.0
 
 
@@ -96,23 +99,31 @@ def _max_mtime(root: Path) -> float:
 @app.post("/parse")
 def parse(req: ParseRequest):
     root = _resolve_repo_path(req.repo_path)
-    key = (str(root), _max_mtime(root), req.entry_module or "")
+    key = (str(root), _max_mtime(root), req.entry_module or "", req.entry_object or "")
     hit = _cache.get(key)
     if hit is not None:
         return hit
     graph = parse_path(root)
+    probe_failed = False
     if req.entry_module:
-        observed = run_probe(root, req.entry_module)
+        observed = run_probe(root, req.entry_module, entry_object=req.entry_object)
         merge_runtime(graph, observed)
+        probe_failed = bool(observed.get("errors"))
     result = graph.model_dump()
-    _cache[key] = result
+    if not probe_failed:
+        _cache[key] = result
     return result
 
 
 @app.post("/probe")
 def probe(req: ProbeRequest):
     root = _resolve_repo_path(req.repo_path)
-    return run_probe(root, req.entry_module, timeout=req.timeout)
+    return run_probe(
+        root,
+        req.entry_module,
+        timeout=req.timeout,
+        entry_object=req.entry_object,
+    )
 
 
 class EmitRequest(BaseModel):
@@ -174,6 +185,18 @@ def traces(req: TraceRequest):
     graph = parse_path(root)
     merged = classify(graph, req.trace)
     return merged.model_dump()
+
+
+class EntryCandidatesRequest(BaseModel):
+    repo_path: str
+    limit: int = 10
+
+
+@app.post("/entry-candidates")
+def entry_candidates(req: EntryCandidatesRequest):
+    root = _resolve_repo_path(req.repo_path)
+    candidates = rank_entry_candidates(root, limit=req.limit)
+    return {"candidates": [c.to_dict() for c in candidates]}
 
 
 @app.get("/health")

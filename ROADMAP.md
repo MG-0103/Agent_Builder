@@ -201,6 +201,38 @@ Still not done:
 - `PropertiesPanel` shows a labeled `trace status` pill on
   edges (green/gray/orange), plus the existing metadata table.
 
+### Entry-module UX ✅
+- `adk_parser/entry_candidates.py` ranks modules that carry
+  agent constructions. Boosts for `__main__` guards, pyproject
+  `[project.scripts]` entries, conventional names (`agent`,
+  `pipeline`, `main`, …). Files with 0 declarative constructions
+  never appear.
+- `POST /entry-candidates` returns the ranked list. Debounced
+  in the client — 400ms after the repo path settles.
+- `LoadRepo` renders the candidates as a `<datalist>`
+  autocomplete on the entry-module input, plus a
+  "use suggestion: X" one-click chip when nothing is typed yet.
+
+### Deeper runtime walker ✅
+- `_inspector.py` recursively descends `.sub_agents`, `.tools`,
+  and all six callback attrs on every discovered agent. Dedupes
+  by object id so a shared child agent gets one node with fan-in
+  edges instead of one node per parent.
+- Callback hook edges carry the source `phase` (which of the six
+  attrs it came from) into `edge.meta.phase` on merge.
+- Anonymous inline agents (no `name` attr) get a synthetic
+  `anon_<id>` name so they still form nodes.
+- `entry_object` parameter on `run_probe`, `/parse`, `/probe`:
+  when set, the inspector calls `entry_module.entry_object()`
+  (or reads it as a bound attribute) and walks the return value.
+  Fixes the "factory function builds the root agent" case the
+  static parser can't unwrap.
+- Fixture `tests/fixtures/factory_probe/` covers the case.
+- Cache invalidation on probe failure: `/parse` no longer caches
+  a merged result when the probe reported errors, so a fix to
+  the entry module or the target code invalidates on the next
+  call.
+
 ### Static extraction gaps (deferred, defensible via runtime probe)
 - Cross-file class-based construction (kwarg exprs resolve in the
   class's module scope, not the instantiation site's).
@@ -218,13 +250,16 @@ Still not done:
 
 ## Recommended next order
 
-1. **Live trace validation** — run a real ADK repo with the
+1. **Sandbox for the runtime probe** — `sys.audit` hooks + rlimit
+   inside the subprocess for cheap policy enforcement; Docker
+   (or bubblewrap on Linux) before running on untrusted repos.
+2. **Live trace validation** — run a real ADK repo with the
    `Tracer` wrappers, POST spans to `/traces`, sanity-check the
    overlay classifications end-to-end.
-2. **Seed-query orchestrator** — iterate inputs until observed
+3. **Seed-query orchestrator** — iterate inputs until observed
    edge set plateaus.
-3. **MCP toolset live expansion** (last Stage B item).
-4. Stage D — file watcher → WebSocket deltas, schema version
+4. **MCP toolset live expansion** (last Stage B item).
+5. Stage D — file watcher → WebSocket deltas, schema version
    negotiation, structured logging.
-5. Additional framework adapters (LangGraph, CrewAI, Claude
+6. Additional framework adapters (LangGraph, CrewAI, Claude
    Agent SDK, AutoGen).

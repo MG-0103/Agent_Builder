@@ -28,6 +28,25 @@ export type ParsedGraph = {
     warnings: Array<Record<string, unknown>>;
 };
 
+export type EntryCandidate = {
+    module: string;
+    path: string;
+    score: number;
+    agent_count: number;
+    reasons: string[];
+};
+
+export async function fetchEntryCandidates(repoPath: string): Promise<EntryCandidate[]> {
+    const res = await fetch(`${BASE}/entry-candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo_path: repoPath }),
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { candidates: EntryCandidate[] };
+    return body.candidates ?? [];
+}
+
 export async function postTrace(
     repoPath: string,
     trace: unknown,

@@ -108,6 +108,17 @@ def test_emit_layout_endpoint():
     assert any(rel.endswith("researcher.py") for rel in body["files"])
 
 
+def test_entry_candidates_endpoint():
+    r = client.post("/entry-candidates", json={"repo_path": str(FIXTURE)})
+    assert r.status_code == 200
+    body = r.json()
+    modules = [c["module"] for c in body["candidates"]]
+    assert "agent" in modules
+    top = body["candidates"][0]
+    assert top["agent_count"] >= 3
+    assert top["score"] > 0
+
+
 def test_traces_endpoint_classifies_edges():
     payload = {
         "repo_path": str(FIXTURE),
@@ -133,6 +144,25 @@ def test_emit_layout_merges_when_asked():
     for _rel, content in r.json()["files"].items():
         assert "# region agentbuilder:generated" in content
         assert "# endregion agentbuilder:generated" in content
+
+
+FACTORY_FIXTURE = Path(__file__).parent / "fixtures" / "factory_probe"
+
+
+def test_parse_with_entry_object_walks_factory():
+    """entry_object=build_root should call the factory and surface the
+    pipeline / researcher / writer graph the static parser can't see."""
+    r = client.post(
+        "/parse",
+        json={
+            "repo_path": str(FACTORY_FIXTURE),
+            "entry_module": "agent",
+            "entry_object": "build_root",
+        },
+    )
+    assert r.status_code == 200
+    names = {n["name"] for n in r.json()["nodes"]}
+    assert {"pipeline", "researcher", "writer"} <= names
 
 
 def test_parse_with_entry_module_merges_probe():
