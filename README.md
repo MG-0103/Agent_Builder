@@ -75,3 +75,5 @@ Paste a repo path into the canvas Load box (or use the ADK fixture at
 ## Status
 
 See [ROADMAP.md](ROADMAP.md) for what's done and what's next.
+See [CONTEXT.md](CONTEXT.md) for the design decisions behind the
+current architecture.
