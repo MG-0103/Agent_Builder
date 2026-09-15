@@ -8,21 +8,24 @@ import { Input } from '../../ui/input';
 
 export function LoadRepo() {
     const [path, setPath] = useState('');
+    const [entryModule, setEntryModule] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const setNodes = useCanvasStore((s) => s.setNodes);
     const setEdges = useCanvasStore((s) => s.setEdges);
+    const setIssues = useCanvasStore((s) => s.setIssues);
 
     const onLoad = async () => {
         if (!path.trim()) return;
         setLoading(true);
         setError(null);
         try {
-            const graph = await parseRepo(path.trim());
+            const graph = await parseRepo(path.trim(), entryModule);
             const { nodes, edges } = graphToFlow(graph);
             setNodes(nodes);
             setEdges(edges);
+            setIssues(graph.warnings ?? [], graph.unresolved ?? []);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -46,6 +49,15 @@ export function LoadRepo() {
                     {loading ? 'Parsing...' : 'Load'}
                 </Button>
             </div>
+            <Input
+                className="w-72"
+                placeholder="entry module (optional, e.g. my_pkg.agent)"
+                value={entryModule}
+                onChange={(e) => setEntryModule(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') onLoad();
+                }}
+            />
             {error && <div className="text-xs text-red-500">{error}</div>}
         </div>
     );

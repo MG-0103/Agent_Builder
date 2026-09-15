@@ -10,15 +10,26 @@ import { useCanvasStore } from './store/store';
 import { useCanvasActions } from './hooks/useCanvasActions';
 
 import DefaultNode from './ui/nodes/DefaultNode';
+import {
+    AgentNode,
+    ToolNode,
+    CallbackNode,
+    AgentAsToolNode,
+} from './ui/nodes/TypedNodes';
 import { PropertiesPanel } from './ui/properties/PropertiesPanel';
 import { LoadRepo } from './ui/LoadRepo';
+import { WarningsPanel } from './ui/WarningsPanel';
 
 import { PanelRight, PanelRightClose } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
 
 
 const nodeTypes = {
-    default: DefaultNode
+    default: DefaultNode,
+    agent: AgentNode,
+    tool: ToolNode,
+    callback: CallbackNode,
+    agent_as_tool: AgentAsToolNode,
 }
 
 
@@ -75,6 +86,7 @@ export default function Canvas() {
                 </ReactFlow>
 
                 <LoadRepo />
+                <WarningsPanel />
                 {showProperties && <PropertiesPanel />}
             </div>
         </>

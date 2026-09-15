@@ -18,9 +18,14 @@ import {
     initialEdges
 } from "../data/initial-elements";
 
+type GraphIssue = Record<string, unknown>;
+
 type CanvasState = {
     nodes: Node[];
     edges: Edge[];
+
+    warnings: GraphIssue[];
+    unresolved: GraphIssue[];
 
     selectedNodeId: string | null;
     selectedEdgeId: string | null;
@@ -37,6 +42,7 @@ type CanvasState = {
 
     setNodes: (nodes: Node[]) => void;
     setEdges: (edges: Edge[] | ((edges: Edge[]) => Edge[])) => void;
+    setIssues: (warnings: GraphIssue[], unresolved: GraphIssue[]) => void;
 
 }
 
@@ -45,8 +51,13 @@ export const useCanvasStore = create<CanvasState>((set) => ({
     nodes: initialNodes,
     edges: initialEdges,
 
+    warnings: [],
+    unresolved: [],
+
     selectedNodeId: null,
     selectedEdgeId: null,
+
+    setIssues: (warnings, unresolved) => set({ warnings, unresolved }),
 
     setSelectedNodeId: (id) =>
         set({ selectedNodeId: id }),

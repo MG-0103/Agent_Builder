@@ -25,13 +25,19 @@ export type ParsedGraph = {
     nodes: GraphNode[];
     edges: GraphEdge[];
     unresolved: Array<Record<string, unknown>>;
+    warnings: Array<Record<string, unknown>>;
 };
 
-export async function parseRepo(repoPath: string): Promise<ParsedGraph> {
+export async function parseRepo(
+    repoPath: string,
+    entryModule?: string,
+): Promise<ParsedGraph> {
+    const body: Record<string, unknown> = { repo_path: repoPath };
+    if (entryModule && entryModule.trim()) body.entry_module = entryModule.trim();
     const res = await fetch(`${BASE}/parse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repo_path: repoPath }),
+        body: JSON.stringify(body),
     });
     if (!res.ok) {
         const detail = await res.text();

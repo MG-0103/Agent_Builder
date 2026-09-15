@@ -1,7 +1,7 @@
 import { useCallback, useRef } from 'react'
 import { addEdge, reconnectEdge } from '@xyflow/react'
 
-import { type Connection, type Edge } from '@xyflow/react'
+import { type Connection, type Edge, type Node, type OnSelectionChangeParams } from '@xyflow/react'
 
 import { useCanvasStore } from '../store/store'
 
@@ -75,7 +75,7 @@ export const useCanvasActions = () => {
         edgeReconnectSuccessful.current = false;
       }, []);
      
-    const onReconnect = useCallback((oldEdge, newConnection) => {
+    const onReconnect = useCallback((oldEdge: Edge, newConnection: Connection) => {
         const { edges, setEdges } = useCanvasStore.getState();
         
         edgeReconnectSuccessful.current = true;
@@ -83,7 +83,7 @@ export const useCanvasActions = () => {
         setEdges(reconnectEdge(oldEdge, newConnection, edges));
     }, []);
      
-    const onReconnectEnd = useCallback((_, edge: Edge) => {
+    const onReconnectEnd = useCallback((_: unknown, edge: Edge) => {
         if (!edgeReconnectSuccessful.current) {
             useCanvasStore
                 .getState()
@@ -103,7 +103,7 @@ export const useCanvasActions = () => {
         (state) => state.setSelectedEdgeId
     );
 
-    const onSelectionChange = useCallback(({ nodes, edges }) => {
+    const onSelectionChange = useCallback(({ nodes, edges }: OnSelectionChangeParams<Node, Edge>) => {
         if (nodes.length === 1 && edges.length === 0) {
             setSelectedNodeId(nodes[0].id);
             setSelectedEdgeId(null);

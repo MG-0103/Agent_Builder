@@ -89,17 +89,29 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 - Schema version negotiation between client and server.
 - Structured logging.
 
-### Stage E — Canvas polish (next up)
-- Typed node components: `AgentNode`, `ToolNode`, `CallbackNode`,
-  `AgentAsToolNode`. Color + shape per kind, model badge on
-  agents.
-- Edge styling by kind: solid `owns_subagent`, dashed `hook`,
-  double `wraps_agent`, colored labels, arrows for `graph_edge`.
-- Auto-layout: swap grid mapper for dagre or elk.
-- Provenance click-through: `file:line` → `vscode://` link on
-  PropertiesPanel.
-- Unresolved / warnings surface panel + canvas badge.
-- Entry-module input alongside repo path in `LoadRepo`.
+### Stage E — Canvas polish ✅
+- Typed node components (`AgentNode`, `ToolNode`, `CallbackNode`,
+  `AgentAsToolNode`) in `client/src/components/canvas/ui/nodes/TypedNodes.tsx`.
+  Color + border per kind, model badge on agents, callback-phase
+  badge, `observed` / `runtime-only` tags from probe merge.
+- Edge styling by kind in `graphMapper.ts`: `owns_subagent` solid
+  navy, `uses_tool` cyan, `wraps_agent` thick violet,
+  `hook` dashed amber, `graph_edge` solid black w/ arrow,
+  `shares_state` animated dashed green. Kind label rendered on
+  each edge.
+- Dagre auto-layout (`@dagrejs/dagre`, TB) replacing the row-per-kind
+  grid.
+- Provenance click-through in PropertiesPanel: `file:line` link
+  with `vscode://file/...` href, plus metadata + connections
+  accordions and edge-selection support.
+- `WarningsPanel`: collapsible list of `graph.warnings` and
+  `graph.unresolved`, hidden when empty.
+- `LoadRepo` gained an entry-module input feeding through to
+  `POST /parse`'s `entry_module` so the runtime probe merge works
+  from the UI.
+- Pre-existing TS strict-mode errors in `useCanvasActions.ts`
+  fixed and `tsconfig.app.json` gets `ignoreDeprecations: "6.0"`
+  so `npm run build` passes.
 
 ### Stage F — Codegen (round-trip)
 - Graph → ADK Python emitter (Jinja templates).
@@ -124,10 +136,8 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 
 ## Recommended next order
 
-1. **Stage E — Canvas polish**. Parser is trustworthy; the
-   default-node canvas is now the main usability gap.
-2. **Stage F — Codegen + round-trip**. Proves parser correctness
+1. **Stage F — Codegen + round-trip**. Proves parser correctness
    end-to-end; unlocks the graph-as-source-of-truth workflow.
-3. **Stage C — Trace overlay**. High value but needs a real
+2. **Stage C — Trace overlay**. High value but needs a real
    running ADK repo to trace against; do it once real code lands.
-4. Stage B tail + Stage D as needed.
+3. Stage B tail + Stage D as needed.
