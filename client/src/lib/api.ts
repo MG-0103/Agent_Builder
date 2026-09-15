@@ -28,6 +28,22 @@ export type ParsedGraph = {
     warnings: Array<Record<string, unknown>>;
 };
 
+export async function postTrace(
+    repoPath: string,
+    trace: unknown,
+): Promise<ParsedGraph> {
+    const res = await fetch(`${BASE}/traces`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ repo_path: repoPath, trace }),
+    });
+    if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`Trace overlay failed (${res.status}): ${detail}`);
+    }
+    return res.json();
+}
+
 export async function parseRepo(
     repoPath: string,
     entryModule?: string,

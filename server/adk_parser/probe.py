@@ -16,14 +16,21 @@ def run_probe(repo_path: str | Path, entry_module: str, timeout: float = 30.0) -
     repo = Path(repo_path).expanduser().resolve()
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{repo}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    proc = subprocess.run(
-        [sys.executable, "-m", "adk_parser._inspector", entry_module],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-        cwd=str(repo),
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "adk_parser._inspector", entry_module],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            cwd=str(repo),
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "nodes": [],
+            "edges": [],
+            "errors": [f"probe timed out after {timeout}s (entry_module={entry_module})"],
+        }
     if proc.returncode != 0 and not proc.stdout:
         return {"nodes": [], "edges": [], "errors": [proc.stderr.strip() or "probe failed"]}
     try:
@@ -97,6 +104,6 @@ def merge(graph: Graph, observed: dict[str, Any]) -> Graph:
             )
             existing_edges.add(key)
 
-    if observed.get("errors"):
-        graph.warnings.append({"kind": "probe_error", "errors": observed["errors"]})
+    for err in observed.get("errors", []) or []:
+        graph.warnings.append({"kind": "probe_error", "message": str(err)})
     return graph

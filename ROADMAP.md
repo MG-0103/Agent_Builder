@@ -68,10 +68,17 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 
 ## Not done
 
-### Stage B tail — Runtime probe polish
-- Path allowlist for `/parse` and `/probe` (open FS reads today).
-- MCP toolset live expansion via MCP client handshake.
-- Probe error surfacing on canvas.
+### Stage B tail — Runtime probe polish (partial ✅)
+- Path allowlist ✅. `AGENTBUILDER_ALLOWED_ROOTS` env var
+  (os.pathsep-separated absolute paths) gates every endpoint that
+  takes `repo_path`. Empty/unset = permissive dev default.
+  Out-of-scope paths return 403.
+- Probe error surfacing ✅. `subprocess.TimeoutExpired` is caught
+  in `run_probe`; each error becomes its own
+  `{kind: "probe_error", message: str}` warning after merge,
+  visible in the client's WarningsPanel.
+- Still not done: MCP toolset live expansion via MCP client
+  handshake (needs MCP dep).
 
 ### Stage C — Trace overlay ✅ (spans + classifier + client styling)
 - `adk_parser/trace.py`: `Span` / `Trace` pydantic models; a
@@ -180,6 +187,20 @@ Still not done:
   MCP toolset re-hydration.
 - Preserve original tool definition modules.
 
+### Tool provenance ✅
+- Tool-function nodes now key off their *defining* module rather
+  than the referring one; layout emit puts `search_web` back into
+  `pkg/tools.py` instead of co-locating it with the referring
+  agent. Two agents importing the same tool now share one node.
+- `meta.defined_in` is set when the source module differs from the
+  reference site.
+
+### Client UX (Stage C follow-up) ✅
+- `PostTrace` panel: paste `Tracer.export()` JSON, POST to
+  `/traces`, canvas re-renders with edge status overlays.
+- `PropertiesPanel` shows a labeled `trace status` pill on
+  edges (green/gray/orange), plus the existing metadata table.
+
 ### Static extraction gaps (deferred, defensible via runtime probe)
 - Cross-file class-based construction (kwarg exprs resolve in the
   class's module scope, not the instantiation site's).
@@ -202,7 +223,8 @@ Still not done:
    overlay classifications end-to-end.
 2. **Seed-query orchestrator** — iterate inputs until observed
    edge set plateaus.
-3. **Tool provenance fix** — track `defined_in` for
-   `tool_function` nodes so layout emit preserves the original
-   `tools.py` layout.
-4. Stage B tail + Stage D as needed.
+3. **MCP toolset live expansion** (last Stage B item).
+4. Stage D — file watcher → WebSocket deltas, schema version
+   negotiation, structured logging.
+5. Additional framework adapters (LangGraph, CrewAI, Claude
+   Agent SDK, AutoGen).

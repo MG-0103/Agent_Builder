@@ -106,6 +106,17 @@ export function PropertiesPanel() {
           }
         | undefined;
 
+    // Trace overlay tags edges with meta.status (both / static_only /
+    // observed_only). Show it as its own labeled pill so users don't have to
+    // decode edge colors from the legend.
+    const status =
+        typeof data?.meta?.status === "string" ? (data.meta.status as string) : undefined;
+    const statusStyle: Record<string, string> = {
+        both: "bg-emerald-100 text-emerald-800",
+        static_only: "bg-slate-200 text-slate-700",
+        observed_only: "bg-orange-100 text-orange-800",
+    };
+
     return (
         <Card className="absolute right-4 top-4 z-10 w-80 gap-0 overflow-hidden py-0 shadow-lg">
             <CardHeader className="px-4 py-4">
@@ -129,6 +140,16 @@ export function PropertiesPanel() {
                             General
                         </AccordionTrigger>
                         <AccordionContent className="px-4 space-y-2">
+                            {status && (
+                                <div>
+                                    <div className="mb-1 text-xs text-slate-500">Trace status</div>
+                                    <span
+                                        className={`inline-block rounded px-2 py-[2px] text-[11px] font-medium ${statusStyle[status] ?? "bg-slate-100 text-slate-700"}`}
+                                    >
+                                        {status.replace(/_/g, " ")}
+                                    </span>
+                                </div>
+                            )}
                             {data?.provenance && (
                                 <div>
                                     <div className="mb-1 text-xs text-slate-500">Source</div>

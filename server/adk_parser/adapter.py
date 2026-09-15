@@ -364,7 +364,7 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
         if agent_local:
             mod.symbols[agent_local] = agent_id
 
-        _extract_tools(effective, agent_id, mod, graph)
+        _extract_tools(effective, agent_id, mod, graph, modules_by_fq)
         _extract_sub_agents(effective, agent_id, mod, graph)
         _extract_callbacks(effective, agent_id, mod, graph)
 
@@ -435,7 +435,13 @@ def _ref_placeholder(expr: ast.expr, mod: ModuleIndex) -> str | None:
     return f"{PLACEHOLDER_PREFIX}{module_fq}::{symbol}"
 
 
-def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph) -> None:
+def _extract_tools(
+    call: ast.Call,
+    agent_id: str,
+    mod: ModuleIndex,
+    graph: Graph,
+    modules_by_fq: dict[str, ModuleIndex] | None = None,
+) -> None:
     tools = _kwarg(call, "tools")
     if tools is None:
         return
@@ -447,7 +453,7 @@ def _extract_tools(call: ast.Call, agent_id: str, mod: ModuleIndex, graph: Graph
         )
         return
     for i, elt in enumerate(elts):
-        tool_id, tool_node, edge_kind = _resolve_tool_elt(elt, mod, i)
+        tool_id, tool_node, edge_kind = _resolve_tool_elt(elt, mod, i, modules_by_fq)
         if tool_node and not any(n.id == tool_id for n in graph.nodes):
             graph.nodes.append(tool_node)
         graph.edges.append(
@@ -518,14 +524,65 @@ def _resolve_tool_list(
     return None
 
 
-def _resolve_tool_elt(elt: ast.expr, mod: ModuleIndex, idx: int) -> tuple[str, Node | None, str]:
+def _resolve_defined_in(
+    name: str,
+    mod: ModuleIndex,
+    modules_by_fq: dict[str, ModuleIndex] | None,
+) -> tuple[str | None, Path | None, int | None]:
+    """Chase imports back to where ``name`` is defined.
+
+    Returns ``(defining_fq, defining_path, def_lineno)``. Any of these can be
+    None if resolution stops early (e.g. name is defined locally, or the
+    source module wasn't parsed).
+    """
+    if modules_by_fq is None:
+        return None, None, None
+    seen: set[tuple[str, str]] = set()
+    cur_mod = mod
+    cur_name = name
+    while True:
+        key = (cur_mod.fq_module, cur_name)
+        if key in seen:
+            return None, None, None
+        seen.add(key)
+        # Prefer following an import binding — chase to the source module.
+        if cur_name in cur_mod.imports:
+            src_fq, src_name = cur_mod.imports[cur_name]
+            nxt = modules_by_fq.get(src_fq)
+            if nxt is None:
+                # Import points outside our parsed set; treat this as the end.
+                return src_fq, None, None
+            cur_mod = nxt
+            cur_name = src_name
+            continue
+        # No further hop. If a top-level def exists here, record its line.
+        fn = _module_function_def(cur_mod.tree, cur_name)
+        return cur_mod.fq_module, cur_mod.path, (fn.lineno if fn else None)
+
+
+def _resolve_tool_elt(
+    elt: ast.expr,
+    mod: ModuleIndex,
+    idx: int,
+    modules_by_fq: dict[str, ModuleIndex] | None = None,
+) -> tuple[str, Node | None, str]:
     if isinstance(elt, ast.Name):
-        tid = f"{mod.fq_module}:tool:{elt.id}"
+        # Tool identity keys off the *defining* module when we can resolve it,
+        # so two agents importing the same function share a node.
+        def_fq, def_path, def_line = _resolve_defined_in(elt.id, mod, modules_by_fq)
+        owning_fq = def_fq or mod.fq_module
+        tid = f"{owning_fq}:tool:{elt.id}"
+        prov_file = str(def_path) if def_path else str(mod.path)
+        prov_line = def_line if def_line is not None else elt.lineno
+        meta: dict = {}
+        if def_fq and def_fq != mod.fq_module:
+            meta["defined_in"] = def_fq
         node = Node(
             id=tid,
             kind="tool_function",
             name=elt.id,
-            provenance=Provenance(file=str(mod.path), line=elt.lineno),
+            provenance=Provenance(file=prov_file, line=prov_line),
+            meta=meta,
         )
         mod.symbols.setdefault(elt.id, tid)
         return tid, node, "uses_tool"

@@ -27,6 +27,9 @@ type CanvasState = {
     warnings: GraphIssue[];
     unresolved: GraphIssue[];
 
+    lastRepoPath: string | null;
+    setLastRepoPath: (path: string | null) => void;
+
     selectedNodeId: string | null;
     selectedEdgeId: string | null;
 
@@ -53,6 +56,9 @@ export const useCanvasStore = create<CanvasState>((set) => ({
 
     warnings: [],
     unresolved: [],
+
+    lastRepoPath: null,
+    setLastRepoPath: (path) => set({ lastRepoPath: path }),
 
     selectedNodeId: null,
     selectedEdgeId: null,

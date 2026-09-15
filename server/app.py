@@ -19,6 +19,50 @@ app.add_middleware(
 )
 
 
+def _allowed_roots() -> list[Path]:
+    """Resolved absolute roots the endpoints are permitted to read.
+
+    Read from ``AGENTBUILDER_ALLOWED_ROOTS`` (colon-separated on POSIX,
+    semicolon on Windows via os.pathsep). Empty/unset means permissive
+    mode — every path is allowed. Intended default for local dev; a
+    deployed instance should set this.
+    """
+    raw = os.environ.get("AGENTBUILDER_ALLOWED_ROOTS", "").strip()
+    if not raw:
+        return []
+    roots: list[Path] = []
+    for part in raw.split(os.pathsep):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            roots.append(Path(p).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
+def _resolve_repo_path(raw: str) -> Path:
+    """Resolve + validate ``raw`` against the allowlist. 400 if bad, 403 if
+    outside every allowed root."""
+    root = Path(raw).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    allowed = _allowed_roots()
+    if allowed:
+        for base in allowed:
+            try:
+                root.relative_to(base)
+                return root
+            except ValueError:
+                continue
+        raise HTTPException(
+            status_code=403,
+            detail=f"path {root} is outside AGENTBUILDER_ALLOWED_ROOTS",
+        )
+    return root
+
+
 class ParseRequest(BaseModel):
     repo_path: str
     entry_module: str | None = None  # If set, merge runtime probe into result.
@@ -51,9 +95,7 @@ def _max_mtime(root: Path) -> float:
 
 @app.post("/parse")
 def parse(req: ParseRequest):
-    root = Path(req.repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    root = _resolve_repo_path(req.repo_path)
     key = (str(root), _max_mtime(root), req.entry_module or "")
     hit = _cache.get(key)
     if hit is not None:
@@ -69,9 +111,7 @@ def parse(req: ParseRequest):
 
 @app.post("/probe")
 def probe(req: ProbeRequest):
-    root = Path(req.repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    root = _resolve_repo_path(req.repo_path)
     return run_probe(root, req.entry_module, timeout=req.timeout)
 
 
@@ -81,9 +121,7 @@ class EmitRequest(BaseModel):
 
 @app.post("/emit")
 def emit(req: EmitRequest):
-    root = Path(req.repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    root = _resolve_repo_path(req.repo_path)
     graph = parse_path(root)
     try:
         source = emit_python(graph)
@@ -102,9 +140,7 @@ class EmitLayoutRequest(BaseModel):
 
 @app.post("/emit-layout")
 def emit_layout_endpoint(req: EmitLayoutRequest):
-    root = Path(req.repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    root = _resolve_repo_path(req.repo_path)
     graph = parse_path(root)
     try:
         bodies = emit_layout(graph)
@@ -134,9 +170,7 @@ class TraceRequest(BaseModel):
 
 @app.post("/traces")
 def traces(req: TraceRequest):
-    root = Path(req.repo_path).expanduser().resolve()
-    if not root.exists() or not root.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    root = _resolve_repo_path(req.repo_path)
     graph = parse_path(root)
     merged = classify(graph, req.trace)
     return merged.model_dump()

@@ -32,6 +32,22 @@ def test_parse_bad_path():
     assert r.status_code == 400
 
 
+def test_parse_outside_allowlist_returns_403(tmp_path, monkeypatch):
+    # Restrict to tmp_path; FIXTURE is elsewhere, so /parse must refuse.
+    monkeypatch.setenv("AGENTBUILDER_ALLOWED_ROOTS", str(tmp_path))
+    r = client.post("/parse", json={"repo_path": str(FIXTURE)})
+    assert r.status_code == 403
+
+
+def test_parse_inside_allowlist_ok(tmp_path, monkeypatch):
+    import shutil
+    scratch = tmp_path / "proj"
+    shutil.copytree(FIXTURE, scratch)
+    monkeypatch.setenv("AGENTBUILDER_ALLOWED_ROOTS", str(tmp_path))
+    r = client.post("/parse", json={"repo_path": str(scratch)})
+    assert r.status_code == 200
+
+
 def test_parse_cache_returns_same_object():
     r1 = client.post("/parse", json={"repo_path": str(FIXTURE)})
     r2 = client.post("/parse", json={"repo_path": str(FIXTURE)})

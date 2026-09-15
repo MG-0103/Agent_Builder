@@ -20,6 +20,7 @@ import { PropertiesPanel } from './ui/properties/PropertiesPanel';
 import { LoadRepo } from './ui/LoadRepo';
 import { WarningsPanel } from './ui/WarningsPanel';
 import { TraceLegend } from './ui/TraceLegend';
+import { PostTrace } from './ui/PostTrace';
 
 import { PanelRight, PanelRightClose } from 'lucide-react';
 import '@xyflow/react/dist/style.css';
@@ -89,6 +90,7 @@ export default function Canvas() {
                 <LoadRepo />
                 <WarningsPanel />
                 <TraceLegend />
+                <PostTrace />
                 {showProperties && <PropertiesPanel />}
             </div>
         </>

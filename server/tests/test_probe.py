@@ -56,3 +56,16 @@ def test_merge_full_probe_flow():
     # All discovered nodes should be tagged observed.
     for n in merged.nodes:
         assert n.meta.get("observed") is True
+
+
+def test_probe_error_becomes_graph_warning():
+    """A missing entry module surfaces as a probe_error warning after merge."""
+    g = Graph(source_root=str(FIXTURE))
+    observed = run_probe(FIXTURE, "does_not_exist_module")
+    assert observed["errors"], "expected import failure to be captured"
+    merged = merge_runtime(g, observed)
+    kinds = {w.get("kind") for w in merged.warnings}
+    assert "probe_error" in kinds
+    # Each error string becomes one warning message.
+    msgs = [w.get("message") for w in merged.warnings if w.get("kind") == "probe_error"]
+    assert all(isinstance(m, str) for m in msgs)

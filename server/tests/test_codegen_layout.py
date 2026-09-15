@@ -64,6 +64,22 @@ def test_layout_round_trip(fixture, tmp_path):
     )
 
 
+def test_tools_stay_in_their_own_module():
+    """Regression: a function defined in pkg/tools.py and imported by
+    pkg/researcher.py should be emitted into pkg/tools.py, not co-located
+    with the referring agent."""
+    g = parse_path(FIXTURES / "multi_file")
+    files = emit_layout(g)
+    assert "pkg/tools.py" in files, list(files)
+    tools_body = files["pkg/tools.py"]
+    assert "def search_web" in tools_body
+    assert "def summarize" in tools_body
+    # Researcher should import from .tools rather than defining stubs.
+    researcher_body = files["pkg/researcher.py"]
+    assert "def search_web" not in researcher_body
+    assert "from pkg.tools import" in researcher_body
+
+
 def test_apply_region_appends_when_absent(tmp_path):
     existing = "# hand-written\nimport os\n"
     merged = apply_region(existing, "x = 1\n")

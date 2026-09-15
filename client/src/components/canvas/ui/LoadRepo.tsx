@@ -15,6 +15,7 @@ export function LoadRepo() {
     const setNodes = useCanvasStore((s) => s.setNodes);
     const setEdges = useCanvasStore((s) => s.setEdges);
     const setIssues = useCanvasStore((s) => s.setIssues);
+    const setLastRepoPath = useCanvasStore((s) => s.setLastRepoPath);
 
     const onLoad = async () => {
         if (!path.trim()) return;
@@ -26,6 +27,7 @@ export function LoadRepo() {
             setNodes(nodes);
             setEdges(edges);
             setIssues(graph.warnings ?? [], graph.unresolved ?? []);
+            setLastRepoPath(path.trim());
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         } finally {
