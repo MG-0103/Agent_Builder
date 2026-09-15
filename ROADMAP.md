@@ -73,16 +73,32 @@ tools, malformed sources, CLI, HTTP, and runtime probe.
 - MCP toolset live expansion via MCP client handshake.
 - Probe error surfacing on canvas.
 
-### Stage C — Trace overlay (biggest correctness gain)
-- OTel-style span emitter auto-wrapping ADK callback hooks
-  (`before_agent_callback`, `before_tool_callback`,
-  `before_model_callback`).
-- `/traces` collector aggregating spans into an observed graph.
-- Edge status classification: `static_only` (dead path),
-  `observed_only` (parser gap), `both` (confirmed). Rendered as
-  edge color/style.
+### Stage C — Trace overlay ✅ (spans + classifier + client styling)
+- `adk_parser/trace.py`: `Span` / `Trace` pydantic models; a
+  minimal wire format (kind, name, parent_id, attrs) that ADK
+  callbacks can emit without an OTel dependency.
+- `adk_parser/tracer.py`: `Tracer` helper users drop into their
+  ADK code — `wrap_agent_callback`, `wrap_tool_callback`,
+  `wrap_named_callback` emit spans with correct parent linkage
+  via a contextvar.
+- `adk_parser/overlay.py`: `classify(static_graph, trace)` tags
+  every static edge with `meta.status`:
+  - `both` — parsed and observed
+  - `static_only` — parsed but never fired at runtime
+  - `observed_only` — trace showed an edge the parser missed
+    (added as a new edge + `runtime_only` node).
+- `POST /traces` accepts `{repo_path, trace}` and returns the
+  classified graph.
+- Client edge styling reads `meta.status`: green animated for
+  `both`, gray dashed for `static_only`, orange animated for
+  `observed_only`. `TraceLegend` renders bottom-left only when
+  the graph actually carries status metadata.
+- 4 overlay tests + 1 HTTP test.
+
+Still not done:
 - Seed-query orchestrator: run inputs, collect spans, iterate
   until coverage plateau.
+- Live ADK integration test against a real running project.
 
 ### Stage D — Server infra
 - File watcher → WebSocket streaming graph deltas on save.
@@ -181,10 +197,12 @@ Still not done:
 
 ## Recommended next order
 
-1. **Stage C — Trace overlay**. Highest correctness gain
-   remaining. Needs a real running ADK repo to trace against;
-   do it once real code lands.
-2. **Tool provenance fix** — track `defined_in` for
-   tool_function nodes so layout emit preserves the original
+1. **Live trace validation** — run a real ADK repo with the
+   `Tracer` wrappers, POST spans to `/traces`, sanity-check the
+   overlay classifications end-to-end.
+2. **Seed-query orchestrator** — iterate inputs until observed
+   edge set plateaus.
+3. **Tool provenance fix** — track `defined_in` for
+   `tool_function` nodes so layout emit preserves the original
    `tools.py` layout.
-3. Stage B tail + Stage D as needed.
+4. Stage B tail + Stage D as needed.

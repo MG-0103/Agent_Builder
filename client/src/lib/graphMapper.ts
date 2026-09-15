@@ -4,6 +4,38 @@ import dagre from '@dagrejs/dagre';
 
 import type { GraphEdge, GraphNode, ParsedGraph } from './api';
 
+// Trace-status overlay. When /traces has annotated the graph, meta.status
+// takes precedence over kind-based styling because the runtime signal is
+// more informative than the parser's kind label.
+function statusOverride(status: string | undefined): Partial<Edge> | null {
+    switch (status) {
+        case 'both':
+            return {
+                style: { stroke: '#059669', strokeWidth: 2.5 },
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#059669' },
+                animated: true,
+            };
+        case 'static_only':
+            return {
+                style: {
+                    stroke: '#94a3b8',
+                    strokeWidth: 1.2,
+                    strokeDasharray: '3 3',
+                    opacity: 0.7,
+                },
+                markerEnd: { type: MarkerType.Arrow, color: '#94a3b8' },
+            };
+        case 'observed_only':
+            return {
+                style: { stroke: '#ea580c', strokeWidth: 2 },
+                markerEnd: { type: MarkerType.ArrowClosed, color: '#ea580c' },
+                animated: true,
+            };
+        default:
+            return null;
+    }
+}
+
 const NODE_W = 220;
 const NODE_H = 72;
 
@@ -129,18 +161,26 @@ export function graphToFlow(graph: ParsedGraph): { nodes: Node[]; edges: Edge[] 
     const nodeIds = new Set(rawNodes.map((n) => n.id));
     const edges: Edge[] = graph.edges
         .filter((e: GraphEdge) => nodeIds.has(e.source) && nodeIds.has(e.target))
-        .map((e) => ({
-            id: e.id,
-            source: e.source,
-            target: e.target,
-            label: e.kind.replace(/_/g, ' '),
-            labelStyle: { fontSize: 10, fill: '#475569' },
-            labelBgPadding: [4, 2] as [number, number],
-            labelBgBorderRadius: 4,
-            labelBgStyle: { fill: '#f8fafc', fillOpacity: 0.9 },
-            data: { kind: e.kind, meta: e.meta },
-            ...edgeStyleFor(e.kind),
-        }));
+        .map((e) => {
+            const status = (e.meta as Record<string, unknown> | undefined)?.status as
+                | string
+                | undefined;
+            const override = statusOverride(status);
+            const base = edgeStyleFor(e.kind);
+            return {
+                id: e.id,
+                source: e.source,
+                target: e.target,
+                label: e.kind.replace(/_/g, ' '),
+                labelStyle: { fontSize: 10, fill: '#475569' },
+                labelBgPadding: [4, 2] as [number, number],
+                labelBgBorderRadius: 4,
+                labelBgStyle: { fill: '#f8fafc', fillOpacity: 0.9 },
+                data: { kind: e.kind, meta: e.meta, status },
+                ...base,
+                ...(override ?? {}),
+            };
+        });
 
     const nodes = layout(rawNodes, edges);
     return { nodes, edges };

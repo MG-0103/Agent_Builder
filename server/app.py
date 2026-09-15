@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from adk_parser import parse_path, run_probe, merge_runtime
+from adk_parser import Trace, classify, parse_path, run_probe, merge_runtime
 from adk_parser.codegen import EmitSkipped, apply_region, emit_layout, emit_python
 
 app = FastAPI(title="AgentBuilder Parser")
@@ -125,6 +125,21 @@ def emit_layout_endpoint(req: EmitLayoutRequest):
         "framework": graph.framework,
         "version": graph.version,
     }
+
+
+class TraceRequest(BaseModel):
+    repo_path: str
+    trace: Trace
+
+
+@app.post("/traces")
+def traces(req: TraceRequest):
+    root = Path(req.repo_path).expanduser().resolve()
+    if not root.exists() or not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+    graph = parse_path(root)
+    merged = classify(graph, req.trace)
+    return merged.model_dump()
 
 
 @app.get("/health")

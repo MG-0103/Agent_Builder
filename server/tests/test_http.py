@@ -92,6 +92,24 @@ def test_emit_layout_endpoint():
     assert any(rel.endswith("researcher.py") for rel in body["files"])
 
 
+def test_traces_endpoint_classifies_edges():
+    payload = {
+        "repo_path": str(FIXTURE),
+        "trace": {
+            "spans": [
+                {"id": "a1", "kind": "agent", "name": "researcher"},
+                {"id": "t1", "kind": "tool_call", "name": "search_web", "parent_id": "a1"},
+            ]
+        },
+    }
+    r = client.post("/traces", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    statuses = {e["meta"].get("status") for e in body["edges"] if e["meta"]}
+    assert "both" in statuses
+    assert "static_only" in statuses
+
+
 def test_emit_layout_merges_when_asked():
     MULTI = Path(__file__).parent / "fixtures" / "multi_file"
     r = client.post("/emit-layout", json={"repo_path": str(MULTI), "merge": True})
