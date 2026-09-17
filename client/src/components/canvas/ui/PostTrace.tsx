@@ -6,6 +6,23 @@ import { graphToFlow } from '../../../lib/graphMapper';
 import { useCanvasStore } from '../store/store';
 import { Button } from '../../ui/button';
 
+// Extract a Trace-shaped object from arbitrary parsed JSON. Accepts either
+// a bare `{spans: [...]}` or a wrapper `{trace: {spans: [...]}}`. Returns
+// null on anything else so the caller can surface a clear error instead of
+// sending garbage to the server.
+function extractTrace(parsed: unknown): { spans: unknown[] } | null {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    const candidate =
+        Array.isArray(obj.spans)
+            ? obj
+            : obj.trace && typeof obj.trace === 'object' && !Array.isArray(obj.trace)
+              ? (obj.trace as Record<string, unknown>)
+              : null;
+    if (!candidate || !Array.isArray(candidate.spans)) return null;
+    return candidate as { spans: unknown[] };
+}
+
 // Paste-a-JSON-trace panel. Wants a shape like {"spans": [...]} matching
 // adk_parser.trace.Trace. Reuses the last repo path from the LoadRepo box.
 export function PostTrace() {
@@ -14,10 +31,11 @@ export function PostTrace() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
+    // Only lastRepoPath drives this component's render; the setters are
+    // stable references from zustand so reading them off getState in the
+    // handler avoids re-rendering on every unrelated store change (node
+    // drags, edge edits).
     const lastRepoPath = useCanvasStore((s) => s.lastRepoPath);
-    const setNodes = useCanvasStore((s) => s.setNodes);
-    const setEdges = useCanvasStore((s) => s.setEdges);
-    const setIssues = useCanvasStore((s) => s.setIssues);
 
     const onApply = async () => {
         if (!lastRepoPath) {
@@ -25,6 +43,7 @@ export function PostTrace() {
             return;
         }
         setError(null);
+
         let parsed: unknown;
         try {
             parsed = JSON.parse(raw || '{}');
@@ -32,17 +51,30 @@ export function PostTrace() {
             setError(e instanceof Error ? e.message : String(e));
             return;
         }
-        // Accept either a bare Trace object or a wrapped {trace: {...}}.
-        const trace =
-            typeof parsed === 'object' && parsed && 'spans' in parsed
-                ? parsed
-                : (parsed as { trace?: unknown }).trace;
+
+        const trace = extractTrace(parsed);
+        if (!trace) {
+            setError('Expected {"spans": [...]} or {"trace": {"spans": [...]}}.');
+            return;
+        }
+
+        const { setNodes, setEdges, setIssues, nodes: prevNodes } =
+            useCanvasStore.getState();
+
+        // Preserve the user's arranged positions across overlay apply.
+        // Dagre re-runs inside graphToFlow, but a canvas the user has been
+        // rearranging shouldn't jump on trace apply.
+        const prevPositions = new Map(prevNodes.map((n) => [n.id, n.position]));
 
         setLoading(true);
         try {
             const graph = await postTrace(lastRepoPath, trace);
             const flow = graphToFlow(graph);
-            setNodes(flow.nodes);
+            const merged = flow.nodes.map((n) => {
+                const prev = prevPositions.get(n.id);
+                return prev ? { ...n, position: prev } : n;
+            });
+            setNodes(merged);
             setEdges(flow.edges);
             setIssues(graph.warnings ?? [], graph.unresolved ?? []);
         } catch (e) {
@@ -56,6 +88,7 @@ export function PostTrace() {
         <div className="absolute right-4 bottom-4 z-10 w-80 rounded-md border bg-white/95 shadow-lg backdrop-blur">
             <button
                 type="button"
+                aria-expanded={open}
                 onClick={() => setOpen((v) => !v)}
                 className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-slate-700"
             >
@@ -64,9 +97,9 @@ export function PostTrace() {
                     Trace overlay
                 </span>
                 {open ? (
-                    <ChevronDown className="h-4 w-4" />
-                ) : (
                     <ChevronUp className="h-4 w-4" />
+                ) : (
+                    <ChevronDown className="h-4 w-4" />
                 )}
             </button>
 
@@ -76,6 +109,7 @@ export function PostTrace() {
                         Paste JSON produced by <code>Tracer.export()</code>.
                     </div>
                     <textarea
+                        aria-label="Trace JSON"
                         className="mb-2 h-32 w-full resize-none rounded border bg-white px-2 py-1 font-mono text-[11px]"
                         placeholder='{"spans": [{"id": "a1", "kind": "agent", "name": "researcher"}]}'
                         value={raw}

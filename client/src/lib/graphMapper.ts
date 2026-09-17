@@ -4,9 +4,11 @@ import dagre from '@dagrejs/dagre';
 
 import type { GraphEdge, GraphNode, ParsedGraph } from './api';
 
-// Trace-status overlay. When /traces has annotated the graph, meta.status
-// takes precedence over kind-based styling because the runtime signal is
-// more informative than the parser's kind label.
+// Trace-status overlay. When /traces has annotated the graph, the runtime
+// signal (color, marker, animation) wins over kind styling because it's
+// more informative than the parser's kind label — but stroke *patterns*
+// (dashed shares_state, hook) are preserved so the kind is still readable.
+// Callers merge via `mergeStatus(base, override)` rather than a raw spread.
 function statusOverride(status: string | undefined): Partial<Edge> | null {
     switch (status) {
         case 'both':
@@ -24,6 +26,7 @@ function statusOverride(status: string | undefined): Partial<Edge> | null {
                     opacity: 0.7,
                 },
                 markerEnd: { type: MarkerType.Arrow, color: '#94a3b8' },
+                animated: false,
             };
         case 'observed_only':
             return {
@@ -34,6 +37,20 @@ function statusOverride(status: string | undefined): Partial<Edge> | null {
         default:
             return null;
     }
+}
+
+// Merge kind base with status override, keeping the kind's stroke-dash
+// pattern when the override doesn't set one of its own. Prevents e.g. a
+// `shares_state` edge with `status=both` from silently losing its dashed
+// look and reading as a plain solid edge.
+function mergeStatus(base: Partial<Edge>, override: Partial<Edge>): Partial<Edge> {
+    const baseStyle = (base.style ?? {}) as Record<string, unknown>;
+    const overrideStyle = (override.style ?? {}) as Record<string, unknown>;
+    const style = { ...baseStyle, ...overrideStyle };
+    if (baseStyle.strokeDasharray && !('strokeDasharray' in overrideStyle)) {
+        style.strokeDasharray = baseStyle.strokeDasharray;
+    }
+    return { ...base, ...override, style };
 }
 
 const NODE_W = 220;
@@ -177,8 +194,7 @@ export function graphToFlow(graph: ParsedGraph): { nodes: Node[]; edges: Edge[] 
                 labelBgBorderRadius: 4,
                 labelBgStyle: { fill: '#f8fafc', fillOpacity: 0.9 },
                 data: { kind: e.kind, meta: e.meta, status },
-                ...base,
-                ...(override ?? {}),
+                ...(override ? mergeStatus(base, override) : base),
             };
         });
 
