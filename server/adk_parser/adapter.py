@@ -194,6 +194,49 @@ def _resolve_name_kind(
     return None
 
 
+def _resolve_module_head(
+    head: str, mod: ModuleIndex, modules_by_fq: dict[str, ModuleIndex]
+) -> str | None:
+    """Map a local name in `mod` to the fully-qualified module it stands for,
+    when the head of an attribute chain names a module rather than a symbol.
+
+    Handles three cases:
+      - `import pkg` / `import pkg as p`  -> module_imports[head]
+      - `from pkg import sub` where `pkg.sub` is a real module -> imports[head]
+      - `from . import sub` inside a package (same as above via _resolve_relative)
+    """
+    if head in mod.module_imports:
+        return mod.module_imports[head]
+    if head in mod.imports:
+        parent_fq, sym = mod.imports[head]
+        candidate = f"{parent_fq}.{sym}" if parent_fq else sym
+        if candidate in modules_by_fq:
+            return candidate
+    return None
+
+
+def _resolve_attr_symbol(
+    chain: list[str],
+    mod: ModuleIndex,
+    modules_by_fq: dict[str, ModuleIndex],
+) -> tuple[ModuleIndex, str] | None:
+    """Resolve `a.b.c.Symbol` to (target_module, "Symbol") when `a` (possibly
+    walked into `a.b.c`) names a module. Returns None when the head isn't a
+    known module or the resolved module isn't in the project."""
+    if len(chain) < 2:
+        return None
+    head, *rest = chain
+    src_mod_fq = _resolve_module_head(head, mod, modules_by_fq)
+    if not src_mod_fq:
+        return None
+    *mid, symbol = rest
+    target_fq = ".".join([src_mod_fq, *mid]) if mid else src_mod_fq
+    target = modules_by_fq.get(target_fq)
+    if target is None:
+        return None
+    return target, symbol
+
+
 def _resolve_base_kind(
     base: ast.expr, mod: ModuleIndex, modules_by_fq: dict[str, ModuleIndex]
 ) -> str | None:
@@ -209,17 +252,12 @@ def _resolve_base_kind(
         # module. Lets `class MyAgent(mylib.CustomBase)` resolve when
         # `CustomBase` transitively extends an ADK agent in `mylib`.
         chain = _attr_chain(base)
-        if not chain or len(chain) < 2:
+        if not chain:
             return None
-        head, *rest = chain
-        src_mod_fq = mod.module_imports.get(head)
-        if not src_mod_fq:
+        resolved = _resolve_attr_symbol(chain, mod, modules_by_fq)
+        if resolved is None:
             return None
-        *mid, symbol = rest
-        target_fq = ".".join([src_mod_fq, *mid]) if mid else src_mod_fq
-        target = modules_by_fq.get(target_fq)
-        if target is None:
-            return None
+        target, symbol = resolved
         return _resolve_name_kind(symbol, target, modules_by_fq)
     return None
 
@@ -376,6 +414,10 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
         cls = _resolve_call_name(node, mod.adk_aliases)
         kind: str | None = None
         custom_class: str | None = None
+        # Where the class is defined; used so the super().__init__ lookup
+        # starts in the *class's* module for attribute-call instantiations
+        # like `mylib.MyLlmCustom(...)`.
+        custom_source_mod: ModuleIndex = mod
         if cls in AGENT_CLASSES:
             kind = AGENT_CLASSES[cls]
         elif isinstance(node.func, ast.Name):
@@ -383,17 +425,34 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
             kind = _resolve_name_kind(cls, mod, modules_by_fq)
             if kind:
                 custom_class = cls
+        elif isinstance(node.func, ast.Attribute):
+            # `mylib.MyCustomAgent(...)` / `pkg.sub.MyAgent(...)` — chase
+            # the attribute chain through module imports and resolve the
+            # trailing symbol against the target module's custom-agent
+            # index. Necessary for repos that always qualify agent classes.
+            chain = _attr_chain(node.func)
+            if chain:
+                resolved = _resolve_attr_symbol(chain, mod, modules_by_fq)
+                if resolved is not None:
+                    target, symbol = resolved
+                    k = _resolve_name_kind(symbol, target, modules_by_fq)
+                    if k:
+                        kind = k
+                        cls = symbol
+                        custom_class = symbol
+                        custom_source_mod = target
         if not kind:
             continue
 
-        # For custom-class instantiations declared in the same module, merge
-        # in kwargs from the class's own super().__init__ call. Cross-file
-        # class bodies aren't merged: their kwarg exprs reference symbols in
-        # a different module's scope, which the extractors here don't switch.
+        # Merge kwargs from the class's own `super().__init__(...)` so
+        # instantiations that omit defaults still surface them. Works
+        # cross-file via _lookup_class_super, which chases through imports;
+        # a class defined in another module gets its super init found there.
         effective = node
-        if custom_class and custom_class in mod.class_super_kwargs:
-            sup = mod.class_super_kwargs[custom_class]
-            effective = _merge_kwargs(node, sup)
+        if custom_class:
+            sup = _lookup_class_super(custom_class, custom_source_mod, modules_by_fq)
+            if sup is not None:
+                effective = _merge_kwargs(node, sup)
 
         agent_local = _top_level_assign_name(mod.tree, node)
         name = _kwarg_str(effective, "name") or agent_local or f"anon_{node.lineno}"

@@ -13,6 +13,7 @@ MALFORMED = Path(__file__).parent / "fixtures" / "malformed"
 GRAPH_API = Path(__file__).parent / "fixtures" / "graph_api"
 CUSTOM = Path(__file__).parent / "fixtures" / "custom_agent"
 CUSTOM_CROSS = Path(__file__).parent / "fixtures" / "custom_cross"
+CUSTOM_ATTR = Path(__file__).parent / "fixtures" / "custom_attr"
 ATTR_CHAIN = Path(__file__).parent / "fixtures" / "attr_chain"
 STATE_FLOW = Path(__file__).parent / "fixtures" / "state_flow"
 DYNAMIC_TOOLS = Path(__file__).parent / "fixtures" / "dynamic_tools"
@@ -203,6 +204,25 @@ def test_custom_agent_cross_file_transitive():
     d = _find(g.nodes, "d")
     assert d.kind == "llm_agent"
     assert d.meta["class"] == "DeepReviewer"
+
+
+def test_custom_agent_attribute_call_cross_file():
+    """`base.MyLlmCustom(name=...)` should resolve to llm_agent and pull
+    model + instruction from the class's super().__init__ across files."""
+    g = parse_path(CUSTOM_ATTR)
+    a = _find(g.nodes, "a")
+    assert a.kind == "llm_agent"
+    assert a.meta["class"] == "MyLlmCustom"
+    assert a.meta["model"] == "gemini-1.5"
+    assert a.meta["instruction"] == "be nice"
+
+
+def test_custom_agent_attribute_call_instantiation_wins_on_conflict():
+    g = parse_path(CUSTOM_ATTR)
+    b = _find(g.nodes, "b")
+    assert b.kind == "llm_agent"
+    assert b.meta["model"] == "gemini-2.0"
+    assert b.meta["instruction"] == "be nice"
 
 
 def test_attr_chain_sub_agent_import_module():
