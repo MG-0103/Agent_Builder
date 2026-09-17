@@ -61,11 +61,40 @@ class ModuleIndex:
     class_super_kwargs: dict[str, ast.Call] = field(default_factory=dict)
 
 
+# Directories skipped during the walk. Tests especially: they often contain
+# fixture files with intentionally malformed Python, or import agents that
+# require dev-only stubs — either can crash the AST parse or spam warnings.
+# venv / build / node_modules are just noise.
+SKIP_DIRS = {
+    "tests", "test",
+    "venv", ".venv", "env", ".env",
+    "build", "dist", "site-packages",
+    "node_modules", "__pycache__",
+}
+
+
+def _is_test_file(name: str) -> bool:
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _read_source(path: Path) -> str:
+    """Read Python source as UTF-8. Falls back with error replacement so a
+    stray non-UTF-8 file (common on Windows where the default is cp1252)
+    doesn't abort the whole walk."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+
 def _iter_python_files(root: Path) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d != "__pycache__"]
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in SKIP_DIRS
+        ]
         for fn in filenames:
-            if fn.endswith(".py"):
+            if fn.endswith(".py") and not _is_test_file(fn):
                 yield Path(dirpath) / fn
 
 
@@ -170,8 +199,28 @@ def _resolve_base_kind(
 ) -> str | None:
     if isinstance(base, ast.Name):
         return _resolve_name_kind(base.id, mod, modules_by_fq)
-    if isinstance(base, ast.Attribute) and base.attr in AGENT_CLASSES:
-        return AGENT_CLASSES[base.attr]
+    # Parametrized bases like `Generic[T]` — the actual base is the value.
+    if isinstance(base, ast.Subscript):
+        return _resolve_base_kind(base.value, mod, modules_by_fq)
+    if isinstance(base, ast.Attribute):
+        if base.attr in AGENT_CLASSES:
+            return AGENT_CLASSES[base.attr]
+        # Chase `pkg.mod.Symbol` where `pkg` (or its alias) was imported as a
+        # module. Lets `class MyAgent(mylib.CustomBase)` resolve when
+        # `CustomBase` transitively extends an ADK agent in `mylib`.
+        chain = _attr_chain(base)
+        if not chain or len(chain) < 2:
+            return None
+        head, *rest = chain
+        src_mod_fq = mod.module_imports.get(head)
+        if not src_mod_fq:
+            return None
+        *mid, symbol = rest
+        target_fq = ".".join([src_mod_fq, *mid]) if mid else src_mod_fq
+        target = modules_by_fq.get(target_fq)
+        if target is None:
+            return None
+        return _resolve_name_kind(symbol, target, modules_by_fq)
     return None
 
 
@@ -275,10 +324,15 @@ def parse_path(root: str | Path) -> Graph:
     modules: list[ModuleIndex] = []
     for py in _iter_python_files(root):
         try:
-            tree = ast.parse(py.read_text(), filename=str(py))
+            tree = ast.parse(_read_source(py), filename=str(py))
         except SyntaxError as e:
             graph.warnings.append(
                 {"kind": "syntax_error", "file": str(py), "line": e.lineno, "msg": str(e.msg)}
+            )
+            continue
+        except OSError as e:
+            graph.warnings.append(
+                {"kind": "read_error", "file": str(py), "msg": str(e)}
             )
             continue
         fq = _module_fq(root, py)

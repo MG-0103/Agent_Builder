@@ -10,6 +10,15 @@ import { useCanvasStore } from '../store/store';
 import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 
+// Strip surrounding matching quotes users often paste from a shell.
+function cleanPath(raw: string): string {
+    const s = raw.trim();
+    if (s.length >= 2 && s[0] === s[s.length - 1] && (s[0] === '"' || s[0] === "'")) {
+        return s.slice(1, -1).trim();
+    }
+    return s;
+}
+
 export function LoadRepo() {
     const [path, setPath] = useState('');
     const [entryModule, setEntryModule] = useState('');
@@ -28,7 +37,7 @@ export function LoadRepo() {
     // 400ms is short enough to feel responsive, long enough that each
     // character doesn't trigger an FS walk on the server.
     useEffect(() => {
-        const trimmed = path.trim();
+        const trimmed = cleanPath(path);
         if (!trimmed) {
             setCandidates([]);
             return;
@@ -41,16 +50,17 @@ export function LoadRepo() {
     }, [path]);
 
     const onLoad = async () => {
-        if (!path.trim()) return;
+        const cleaned = cleanPath(path);
+        if (!cleaned) return;
         setLoading(true);
         setError(null);
         try {
-            const graph = await parseRepo(path.trim(), entryModule);
+            const graph = await parseRepo(cleaned, entryModule);
             const { nodes, edges } = graphToFlow(graph);
             setNodes(nodes);
             setEdges(edges);
             setIssues(graph.warnings ?? [], graph.unresolved ?? []);
-            setLastRepoPath(path.trim());
+            setLastRepoPath(cleaned);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
         } finally {

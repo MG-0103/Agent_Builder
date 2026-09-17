@@ -162,6 +162,112 @@ function layout(nodes: Node[], edges: Edge[]): Node[] {
     });
 }
 
+// Collapse per-agent tool / callback children into a single group node so
+// the canvas doesn't get overrun on any agent with many tools. The group
+// keeps the same edge kind (`uses_tool` / `hook`) back to the parent, so
+// styling and trace overlay still work; individual children are stashed on
+// `data.children` for the properties panel to expand.
+type GroupSpec = {
+    kind: 'tool' | 'callback';
+    edgeKind: 'uses_tool' | 'hook';
+    label: (n: number) => string;
+    kindOnNode: string;
+};
+
+const GROUP_SPECS: GroupSpec[] = [
+    { kind: 'tool', edgeKind: 'uses_tool', kindOnNode: 'tool_function',
+      label: (n) => `Tools (${n})` },
+    { kind: 'callback', edgeKind: 'hook', kindOnNode: 'callback',
+      label: (n) => `Callbacks (${n})` },
+];
+
+function aggregateChildren(
+    rawNodes: Node[],
+    graphEdges: GraphEdge[],
+): { nodes: Node[]; edges: GraphEdge[] } {
+    const byId = new Map(rawNodes.map((n) => [n.id, n]));
+    const droppedNodeIds = new Set<string>();
+    const droppedEdgeIds = new Set<string>();
+    const addedNodes: Node[] = [];
+    const addedEdges: GraphEdge[] = [];
+
+    for (const spec of GROUP_SPECS) {
+        // parent agent id -> child node ids reachable via this edge kind.
+        const byParent = new Map<string, string[]>();
+        const parentEdges = new Map<string, GraphEdge[]>();
+        for (const e of graphEdges) {
+            if (e.kind !== spec.edgeKind) continue;
+            const child = byId.get(e.target);
+            if (!child) continue;
+            const childType = child.type;
+            if (childType !== spec.kind) continue;
+            (byParent.get(e.source) ?? byParent.set(e.source, []).get(e.source)!).push(e.target);
+            (parentEdges.get(e.source) ?? parentEdges.set(e.source, []).get(e.source)!).push(e);
+        }
+
+        for (const [parentId, childIds] of byParent) {
+            if (childIds.length < 2) continue; // don't group a single child
+            const children = childIds.map((id) => byId.get(id)!).filter(Boolean);
+            const groupId = `${parentId}:${spec.kind}s`;
+            addedNodes.push({
+                id: groupId,
+                type: spec.kind,
+                position: { x: 0, y: 0 },
+                data: {
+                    label: spec.label(children.length),
+                    kind: spec.kindOnNode,
+                    isGroup: true,
+                    children: children.map((c) => ({
+                        id: c.id,
+                        label: c.data?.label,
+                        kind: c.data?.kind,
+                        provenance: c.data?.provenance,
+                        meta: c.data?.meta,
+                    })),
+                },
+            });
+            // The child stays hidden only when nothing else references it.
+            // A tool wired to a second agent is kept and re-attached to
+            // that agent's own group (or stands alone if not grouped there).
+            for (const cid of childIds) droppedNodeIds.add(cid);
+            for (const e of parentEdges.get(parentId) ?? []) droppedEdgeIds.add(e.id);
+            addedEdges.push({
+                id: `${groupId}:edge`,
+                source: parentId,
+                target: groupId,
+                kind: spec.edgeKind,
+                meta: {},
+            });
+        }
+    }
+
+    // Re-inspect: if a dropped child had any non-grouped edge (e.g. it's
+    // referenced by another agent whose group didn't form, or by a
+    // non-uses_tool edge), keep the child and its remaining edges.
+    const stillReferenced = new Set<string>();
+    for (const e of graphEdges) {
+        if (droppedEdgeIds.has(e.id)) continue;
+        if (droppedNodeIds.has(e.source)) stillReferenced.add(e.source);
+        if (droppedNodeIds.has(e.target)) stillReferenced.add(e.target);
+    }
+    for (const id of stillReferenced) droppedNodeIds.delete(id);
+
+    const nodes = [
+        ...rawNodes.filter((n) => !droppedNodeIds.has(n.id)),
+        ...addedNodes,
+    ];
+    const edges = [
+        ...graphEdges.filter(
+            (e) =>
+                !droppedEdgeIds.has(e.id) &&
+                !droppedNodeIds.has(e.source) &&
+                !droppedNodeIds.has(e.target),
+        ),
+        ...addedEdges,
+    ];
+    return { nodes, edges };
+}
+
 export function graphToFlow(graph: ParsedGraph): { nodes: Node[]; edges: Edge[] } {
     const rawNodes: Node[] = graph.nodes.map((n: GraphNode) => ({
         id: n.id,
@@ -175,8 +281,9 @@ export function graphToFlow(graph: ParsedGraph): { nodes: Node[]; edges: Edge[] 
         },
     }));
 
-    const nodeIds = new Set(rawNodes.map((n) => n.id));
-    const edges: Edge[] = graph.edges
+    const { nodes: postNodes, edges: postEdges } = aggregateChildren(rawNodes, graph.edges);
+    const nodeIds = new Set(postNodes.map((n) => n.id));
+    const edges: Edge[] = postEdges
         .filter((e: GraphEdge) => nodeIds.has(e.source) && nodeIds.has(e.target))
         .map((e) => {
             const status = (e.meta as Record<string, unknown> | undefined)?.status as
@@ -198,6 +305,6 @@ export function graphToFlow(graph: ParsedGraph): { nodes: Node[]; edges: Edge[] 
             };
         });
 
-    const nodes = layout(rawNodes, edges);
+    const nodes = layout(postNodes, edges);
     return { nodes, edges };
 }

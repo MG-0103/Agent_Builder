@@ -43,10 +43,19 @@ def _allowed_roots() -> list[Path]:
     return roots
 
 
+def _strip_path_quotes(raw: str) -> str:
+    """Strip surrounding matching quotes and whitespace. Users pasting a
+    path from a Windows or macOS shell frequently include them."""
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1].strip()
+    return s
+
+
 def _resolve_repo_path(raw: str) -> Path:
     """Resolve + validate ``raw`` against the allowlist. 400 if bad, 403 if
     outside every allowed root."""
-    root = Path(raw).expanduser().resolve()
+    root = Path(_strip_path_quotes(raw)).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
     allowed = _allowed_roots()

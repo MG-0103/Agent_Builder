@@ -66,10 +66,20 @@ class EntryCandidate:
         }
 
 
+_SKIP_DIRS = {
+    "tests", "test",
+    "venv", ".venv", "env", ".env",
+    "build", "dist", "site-packages",
+    "node_modules", "__pycache__",
+}
+
+
 def _iter_python_files(root: Path) -> Iterable[Path]:
     for p in root.rglob("*.py"):
         parts = p.relative_to(root).parts
-        if any(part.startswith(".") or part == "__pycache__" for part in parts):
+        if any(part.startswith(".") or part in _SKIP_DIRS for part in parts):
+            continue
+        if p.name.startswith("test_") or p.name.endswith("_test.py"):
             continue
         yield p
 
@@ -162,8 +172,8 @@ def rank_entry_candidates(root: Path, limit: int = 10) -> list[EntryCandidate]:
 
     for path in _iter_python_files(root):
         try:
-            tree = ast.parse(path.read_text())
-        except (SyntaxError, UnicodeDecodeError, OSError):
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (SyntaxError, OSError):
             continue
         module = _module_fq(root, path)
         if not module:
