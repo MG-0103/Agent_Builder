@@ -248,6 +248,41 @@ Still not done:
 
 ---
 
+## Auto-probe (in progress)
+
+Automated coverage-driven exploration: LLM-generated queries exercise
+the ADK agent, trace overlay reports which static edges actually fire.
+Six-phase plan, one repo, module boundary `server/auto_probe/`
+depends on `adk_parser`; not vice versa. Multi-turn required (target
+codebases are conversational). Stub-mode default (`schema`,
+`semantic`, `user`); `real` opt-in per tool.
+
+### Phase 0 ✅ (foundations)
+- Parser meta enriched: tool docstrings + parameter + return
+  annotations via `_fn_signature_meta`; agent `description` kwarg
+  captured alongside `instruction`.
+- `server/auto_probe/` scaffolded: `schema.py`, `invoker.py`,
+  `stubs.py`, `generator.py`, `session.py`, `orchestrator.py`,
+  `endpoints.py`. All handlers raise a `NotImplementedYet` /
+  `NotImplementedError` with the phase that owns them; endpoints
+  wrap those into 501 responses.
+- Wire into FastAPI: `POST /explore/invoke`, `POST /explore/run`,
+  `GET /explore/status/{run_id}`.
+- Fixture `rich_meta/` + tests covering docstring, annotations,
+  description extraction and endpoint 501s.
+
+### Phase 1 — Invoker + Tracer wiring (next)
+- `AutoProbeInvoker.invoke_once`: subprocess spawn, ADK Runner
+  around the resolved entry_object, monkey-patch tracer wrappers
+  onto every callback attr, capture spans, return.
+- Real-mode only; runnable fixture that exercises the invoker in CI.
+
+### Phase 2 — Stub-mode
+### Phase 3 — Single-query generator
+### Phase 4 — Multi-turn session loop
+### Phase 5 — Coverage orchestrator
+### Phase 6 — Client wiring
+
 ## Recommended next order
 
 1. **Sandbox for the runtime probe** — `sys.audit` hooks + rlimit

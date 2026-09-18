@@ -9,8 +9,10 @@ from pydantic import BaseModel
 from adk_parser import Trace, classify, parse_path, run_probe, merge_runtime
 from adk_parser.codegen import EmitSkipped, apply_region, emit_layout, emit_python
 from adk_parser.entry_candidates import rank_entry_candidates
+from auto_probe.endpoints import router as auto_probe_router
 
 app = FastAPI(title="AgentBuilder Parser")
+app.include_router(auto_probe_router)
 
 app.add_middleware(
     CORSMiddleware,

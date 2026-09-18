@@ -461,10 +461,15 @@ def _extract_agents(mod: ModuleIndex, graph: Graph, modules_by_fq: dict[str, Mod
         meta: dict = {"class": cls, "model": _kwarg_str(effective, "model")}
         output_key = _kwarg_str(effective, "output_key")
         instruction = _kwarg_str(effective, "instruction")
+        # `description` is how a parent router agent decides to invoke this
+        # one as a sub-agent — critical context for a query generator.
+        description = _kwarg_str(effective, "description")
         if output_key:
             meta["output_key"] = output_key
         if instruction:
             meta["instruction"] = instruction
+        if description:
+            meta["description"] = description
         graph.nodes.append(
             Node(
                 id=agent_id,
@@ -588,9 +593,11 @@ def _module_top_level_assign(tree: ast.Module, name: str) -> ast.expr | None:
     return None
 
 
-def _module_function_def(tree: ast.Module, name: str) -> ast.FunctionDef | None:
+def _module_function_def(
+    tree: ast.Module, name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     for stmt in tree.body:
-        if isinstance(stmt, ast.FunctionDef) and stmt.name == name:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == name:
             return stmt
     return None
 
@@ -635,6 +642,86 @@ def _resolve_tool_list(
         return None
 
     return None
+
+
+def _annotation_str(ann: ast.expr | None) -> str | None:
+    """Turn an AST annotation into its source-text form; None if empty or
+    an unparseable shape."""
+    if ann is None:
+        return None
+    try:
+        return ast.unparse(ann)
+    except Exception:
+        return None
+
+
+def _fn_signature_meta(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
+    """Extract docstring + parameter list + return annotation from a function
+    def. Used to enrich tool nodes so the auto-probe generator has enough
+    context to invent plausible arguments and read the tool's purpose."""
+    meta: dict = {}
+    doc = ast.get_docstring(fn)
+    if doc:
+        meta["docstring"] = doc
+    params: list[dict] = []
+    for a in list(fn.args.posonlyargs) + list(fn.args.args):
+        p: dict = {"name": a.arg}
+        ann = _annotation_str(a.annotation)
+        if ann:
+            p["annotation"] = ann
+        params.append(p)
+    if fn.args.vararg:
+        p = {"name": "*" + fn.args.vararg.arg}
+        ann = _annotation_str(fn.args.vararg.annotation)
+        if ann:
+            p["annotation"] = ann
+        params.append(p)
+    for a in fn.args.kwonlyargs:
+        p = {"name": a.arg, "keyword_only": True}
+        ann = _annotation_str(a.annotation)
+        if ann:
+            p["annotation"] = ann
+        params.append(p)
+    if fn.args.kwarg:
+        p = {"name": "**" + fn.args.kwarg.arg}
+        ann = _annotation_str(fn.args.kwarg.annotation)
+        if ann:
+            p["annotation"] = ann
+        params.append(p)
+    if params:
+        meta["params"] = params
+    ret = _annotation_str(fn.returns)
+    if ret:
+        meta["returns"] = ret
+    return meta
+
+
+def _resolve_fn_def(
+    name: str,
+    mod: ModuleIndex,
+    modules_by_fq: dict[str, ModuleIndex] | None,
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """Follow imports back to the module where ``name`` is defined and return
+    its FunctionDef node when parseable, else None."""
+    if modules_by_fq is None:
+        return _module_function_def(mod.tree, name)
+    seen: set[tuple[str, str]] = set()
+    cur_mod = mod
+    cur_name = name
+    while True:
+        key = (cur_mod.fq_module, cur_name)
+        if key in seen:
+            return None
+        seen.add(key)
+        if cur_name in cur_mod.imports:
+            src_fq, src_name = cur_mod.imports[cur_name]
+            nxt = modules_by_fq.get(src_fq)
+            if nxt is None:
+                return None
+            cur_mod = nxt
+            cur_name = src_name
+            continue
+        return _module_function_def(cur_mod.tree, cur_name)
 
 
 def _resolve_defined_in(
@@ -690,6 +777,9 @@ def _resolve_tool_elt(
         meta: dict = {}
         if def_fq and def_fq != mod.fq_module:
             meta["defined_in"] = def_fq
+        fn = _resolve_fn_def(elt.id, mod, modules_by_fq)
+        if fn is not None:
+            meta.update(_fn_signature_meta(fn))
         node = Node(
             id=tid,
             kind="tool_function",
@@ -737,11 +827,17 @@ def _resolve_tool_elt(
             fn = _kwarg(elt, "func") or (elt.args[0] if elt.args else None)
             fn_name = fn.id if isinstance(fn, ast.Name) else f"anon_{elt.lineno}"
             tid = f"{mod.fq_module}:tool:{fn_name}"
+            meta: dict = {}
+            if isinstance(fn, ast.Name):
+                fn_def = _resolve_fn_def(fn.id, mod, modules_by_fq)
+                if fn_def is not None:
+                    meta.update(_fn_signature_meta(fn_def))
             node = Node(
                 id=tid,
                 kind="tool_function",
                 name=fn_name,
                 provenance=Provenance(file=str(mod.path), line=elt.lineno),
+                meta=meta,
             )
             if isinstance(fn, ast.Name):
                 mod.symbols.setdefault(fn.id, tid)
